@@ -1419,10 +1419,13 @@ class PoliceSimulation:
         self.radio: RadioReport | None = None
         self.decision_remaining = 0.0
         self.elapsed = 0.0
+        self.busted = False
 
     @property
     def arrested(self) -> bool:
-        return any(car.state == PoliceState.ARREST for car in self.police_cars)
+        return self.busted or any(
+            car.state == PoliceState.ARREST for car in self.police_cars
+        )
 
     def _move_player(self, movement: Vec2, dt: float) -> None:
         target_velocity = movement.normalized() * 4.5
@@ -1485,6 +1488,14 @@ class PoliceSimulation:
             self.intercepts[index] = predictor.best_intercept(police)
 
     def step(self, dt: float, movement: Vec2 = Vec2(0.0, 0.0)) -> None:
+        if self.busted:
+            return
+        if any(car.state == PoliceState.ARREST for car in self.police_cars):
+            self.busted = True
+            self.player_velocity = Vec2(0.0, 0.0)
+            for car in self.police_cars:
+                car.velocity = Vec2(0.0, 0.0)
+            return
         dt = min(max(dt, 1e-4), 0.1)
         self.elapsed += dt
         self._move_player(movement, dt)
@@ -1515,6 +1526,11 @@ class PoliceSimulation:
                 radio_velocity=radio_velocity,
                 containment_support=containment_support,
             )
+        if any(car.state == PoliceState.ARREST for car in self.police_cars):
+            self.busted = True
+            self.player_velocity = Vec2(0.0, 0.0)
+            for car in self.police_cars:
+                car.velocity = Vec2(0.0, 0.0)
 ````
 
 ### `main.py`
@@ -1569,6 +1585,39 @@ class PoliceDemo:
             pady=4,
             font=("Segoe UI", 9),
         )
+        self.busted_panel = tk.Frame(self.root, bg="#151b23", padx=10, pady=8)
+        self.busted_label = tk.Label(
+            self.busted_panel,
+            text="BUSTED",
+            bg="#151b23",
+            fg="#ff5268",
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.busted_label.pack(side="left", padx=(0, 14))
+        self.retry_button = tk.Button(
+            self.busted_panel,
+            text="Retry",
+            command=self.retry,
+            width=10,
+            takefocus=True,
+        )
+        self.retry_button.pack(side="left", padx=4)
+        self.quit_button = tk.Button(
+            self.busted_panel,
+            text="Quit",
+            command=self.close,
+            width=10,
+            takefocus=True,
+        )
+        self.quit_button.pack(side="left", padx=4)
+        self.busted_hint = tk.Label(
+            self.busted_panel,
+            text="R or Enter retries  |  Esc quits",
+            bg="#151b23",
+            fg="#94a3b8",
+            font=("Segoe UI", 9),
+        )
+        self.busted_hint.pack(side="left", padx=(14, 0))
 
         self.grid = make_city()
         spawn_points = [
@@ -1615,11 +1664,18 @@ class PoliceDemo:
         self.running = False
         self.root.destroy()
 
+    def retry(self):
+        self.simulation.reset()
+        self.busted_panel.pack_forget()
+        if self.debug_visible:
+            self.status.pack(fill="x", side="bottom")
+        self.canvas.focus_set()
+
     def key_down(self, event):
         key = event.keysym.lower()
         self.keys.add(key)
-        if key == "r":
-            self.simulation.reset()
+        if key in {"r", "return"}:
+            self.retry()
         elif key == "h":
             self.debug_visible = not self.debug_visible
             if self.debug_visible:
@@ -1756,6 +1812,11 @@ class PoliceDemo:
             self.simulation.step(PHYSICS_DT, self.movement_input())
             self.accumulator -= PHYSICS_DT
             steps += 1
+        if self.simulation.busted and not self.busted_panel.winfo_ismapped():
+            if self.debug_visible:
+                self.status.pack_forget()
+            self.busted_panel.pack(fill="x", side="bottom")
+            self.retry_button.focus_set()
         self.draw()
         self.root.after(16, self.tick)
 
@@ -2532,7 +2593,7 @@ def test_trainable_models_have_expected_outputs():
 ### `tests/test_simulation.py`
 
 ````python
-from ai import GridMap, PoliceCarAI, Vec2
+from ai import GridMap, PoliceCarAI, PoliceState, Vec2
 from simulation import PoliceSimulation
 
 
@@ -2592,6 +2653,21 @@ def test_headless_simulation_is_deterministic():
     assert [car.position for car in first.police_cars] == [
         car.position for car in second.police_cars
     ]
+
+
+def test_busted_state_freezes_until_reset():
+    simulation, _ = make_simulation()
+    simulation.police_cars[0].state = PoliceState.ARREST
+    simulation.step(1 / 60)
+    assert simulation.busted
+    frozen_position = simulation.player_position
+    frozen_time = simulation.elapsed
+    simulation.step(1.0, Vec2(1, 0))
+    assert simulation.player_position == frozen_position
+    assert simulation.elapsed == frozen_time
+    simulation.reset()
+    assert not simulation.busted
+    assert simulation.player_position == Vec2(5.5, 5.5)
 ````
 
 ### `pytest.ini`
@@ -2707,11 +2783,13 @@ Controls:
 | Key | Action |
 | --- | --- |
 | `WASD` or arrows | Drive the blue player car |
-| `R` | Reset the simulation and predictors |
+| `R` or `Enter` | Retry/reset the simulation and predictors |
 | `H` | Toggle routes and the external diagnostics strip |
 | `Escape` | Exit |
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
+
+When the player is captured, physics and AI freeze and a compact panel appears below the playfield with two choices: **Retry** and **Quit**. Retry can also be triggered with `R` or `Enter`; `Escape` quits. Restarting clears the radio report, motion predictors, tactical decisions, arrest state, velocities, and elapsed session time.
 
 ## Reproduce the data and training
 

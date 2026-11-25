@@ -1,4 +1,4 @@
-from ai import GridMap, PoliceCarAI, Vec2
+from ai import GridMap, PoliceCarAI, PoliceState, Vec2
 from simulation import PoliceSimulation
 
 
@@ -58,4 +58,19 @@ def test_headless_simulation_is_deterministic():
     assert [car.position for car in first.police_cars] == [
         car.position for car in second.police_cars
     ]
+
+
+def test_busted_state_freezes_until_reset():
+    simulation, _ = make_simulation()
+    simulation.police_cars[0].state = PoliceState.ARREST
+    simulation.step(1 / 60)
+    assert simulation.busted
+    frozen_position = simulation.player_position
+    frozen_time = simulation.elapsed
+    simulation.step(1.0, Vec2(1, 0))
+    assert simulation.player_position == frozen_position
+    assert simulation.elapsed == frozen_time
+    simulation.reset()
+    assert not simulation.busted
+    assert simulation.player_position == Vec2(5.5, 5.5)
 

@@ -47,6 +47,39 @@ class PoliceDemo:
             pady=4,
             font=("Segoe UI", 9),
         )
+        self.busted_panel = tk.Frame(self.root, bg="#151b23", padx=10, pady=8)
+        self.busted_label = tk.Label(
+            self.busted_panel,
+            text="BUSTED",
+            bg="#151b23",
+            fg="#ff5268",
+            font=("Segoe UI", 12, "bold"),
+        )
+        self.busted_label.pack(side="left", padx=(0, 14))
+        self.retry_button = tk.Button(
+            self.busted_panel,
+            text="Retry",
+            command=self.retry,
+            width=10,
+            takefocus=True,
+        )
+        self.retry_button.pack(side="left", padx=4)
+        self.quit_button = tk.Button(
+            self.busted_panel,
+            text="Quit",
+            command=self.close,
+            width=10,
+            takefocus=True,
+        )
+        self.quit_button.pack(side="left", padx=4)
+        self.busted_hint = tk.Label(
+            self.busted_panel,
+            text="R or Enter retries  |  Esc quits",
+            bg="#151b23",
+            fg="#94a3b8",
+            font=("Segoe UI", 9),
+        )
+        self.busted_hint.pack(side="left", padx=(14, 0))
 
         self.grid = make_city()
         spawn_points = [
@@ -93,11 +126,18 @@ class PoliceDemo:
         self.running = False
         self.root.destroy()
 
+    def retry(self):
+        self.simulation.reset()
+        self.busted_panel.pack_forget()
+        if self.debug_visible:
+            self.status.pack(fill="x", side="bottom")
+        self.canvas.focus_set()
+
     def key_down(self, event):
         key = event.keysym.lower()
         self.keys.add(key)
-        if key == "r":
-            self.simulation.reset()
+        if key in {"r", "return"}:
+            self.retry()
         elif key == "h":
             self.debug_visible = not self.debug_visible
             if self.debug_visible:
@@ -234,6 +274,11 @@ class PoliceDemo:
             self.simulation.step(PHYSICS_DT, self.movement_input())
             self.accumulator -= PHYSICS_DT
             steps += 1
+        if self.simulation.busted and not self.busted_panel.winfo_ismapped():
+            if self.debug_visible:
+                self.status.pack_forget()
+            self.busted_panel.pack(fill="x", side="bottom")
+            self.retry_button.focus_set()
         self.draw()
         self.root.after(16, self.tick)
 

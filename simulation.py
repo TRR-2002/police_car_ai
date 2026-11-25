@@ -58,10 +58,13 @@ class PoliceSimulation:
         self.radio: RadioReport | None = None
         self.decision_remaining = 0.0
         self.elapsed = 0.0
+        self.busted = False
 
     @property
     def arrested(self) -> bool:
-        return any(car.state == PoliceState.ARREST for car in self.police_cars)
+        return self.busted or any(
+            car.state == PoliceState.ARREST for car in self.police_cars
+        )
 
     def _move_player(self, movement: Vec2, dt: float) -> None:
         target_velocity = movement.normalized() * 4.5
@@ -124,6 +127,14 @@ class PoliceSimulation:
             self.intercepts[index] = predictor.best_intercept(police)
 
     def step(self, dt: float, movement: Vec2 = Vec2(0.0, 0.0)) -> None:
+        if self.busted:
+            return
+        if any(car.state == PoliceState.ARREST for car in self.police_cars):
+            self.busted = True
+            self.player_velocity = Vec2(0.0, 0.0)
+            for car in self.police_cars:
+                car.velocity = Vec2(0.0, 0.0)
+            return
         dt = min(max(dt, 1e-4), 0.1)
         self.elapsed += dt
         self._move_player(movement, dt)
@@ -154,4 +165,9 @@ class PoliceSimulation:
                 radio_velocity=radio_velocity,
                 containment_support=containment_support,
             )
+        if any(car.state == PoliceState.ARREST for car in self.police_cars):
+            self.busted = True
+            self.player_velocity = Vec2(0.0, 0.0)
+            for car in self.police_cars:
+                car.velocity = Vec2(0.0, 0.0)
 

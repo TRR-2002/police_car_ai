@@ -100,11 +100,13 @@ Controls:
 | Key | Action |
 | --- | --- |
 | `WASD` or arrows | Drive the blue player car |
-| `R` | Reset the simulation and predictors |
+| `R` or `Enter` | Retry/reset the simulation and predictors |
 | `H` | Toggle routes and the external diagnostics strip |
 | `Escape` | Exit |
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
+
+When the player is captured, physics and AI freeze and a compact panel appears below the playfield with two choices: **Retry** and **Quit**. Retry can also be triggered with `R` or `Enter`; `Escape` quits. Restarting clears the radio report, motion predictors, tactical decisions, arrest state, velocities, and elapsed session time.
 
 ## Reproduce the data and training
 
