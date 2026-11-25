@@ -106,7 +106,7 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-The player starts with **three lives**. The only busted rule is one police car remaining within `0.7` game units for `0.65` seconds; player speed and the number of nearby police cars do not affect capture. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+The player starts with **three lives**. The only busted rule is one police car entering within `0.7` game units; capture is immediate, and player speed and the number of nearby police cars do not affect it. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
 
 ### Police-car responsibilities
 
@@ -170,10 +170,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 4 / 4 | 18.496 s |
-| Trained trajectory candidates | 4 / 4 | 11.950 s |
+| Analytical prediction only | 4 / 4 | 4.008 s |
+| Trained trajectory candidates | 4 / 4 | 4.008 s |
 
-Both modes now complete all deterministic scenarios under the distance-only busted rule. The trained candidate system cut mean capture time by 6.546 seconds and reduced the square-route scenario from 38.883 seconds to 12.650 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes now complete all deterministic scenarios. With immediate capture at `0.7` units, the arrest boundary dominates the short benchmark and both prediction modes produce the same result. The learned predictor remains useful for route selection before close contact, but this particular benchmark no longer demonstrates a capture-time advantage. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 

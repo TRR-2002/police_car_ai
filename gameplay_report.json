@@ -6,27 +6,27 @@
     "mode": "analytical_only",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 18.496,
+    "mean_capture_seconds": 4.008,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 6.217
+        "seconds": 2.317
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 26.467
+        "seconds": 9.6
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 38.883
+        "seconds": 2.333
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 2.417
+        "seconds": 1.783
       }
     ]
   },
@@ -34,27 +34,27 @@
     "mode": "trained_trajectory_ensemble",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 11.95,
+    "mean_capture_seconds": 4.008,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 6.217
+        "seconds": 2.317
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 26.517
+        "seconds": 9.6
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 12.65
+        "seconds": 2.333
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 2.417
+        "seconds": 1.783
       }
     ]
   }

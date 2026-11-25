@@ -920,14 +920,13 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            # Capture has one clear rule: maintain contact inside arrest range.
+            # Capture has one clear rule: crossing inside arrest range.
             if distance <= self.arrest_range:
-                self.capture_progress += dt
-            else:
-                self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
-            if self.capture_progress >= 0.65:
+                self.capture_progress = 0.0
                 self._transition(PoliceState.ARREST)
-            elif contact:
+            else:
+                self.capture_progress = 0.0
+            if self.state == PoliceState.CHASE and contact:
                 self.lost_time = 0.0
                 self.last_seen = observed_position
                 # Lead a moving target, with prediction bounded to avoid wild routes.
@@ -938,7 +937,7 @@ class PoliceCarAI:
                     else observed_position + observed_velocity * lead_time
                 ) + tactical_offset
                 self._plan(predicted)
-            else:
+            elif self.state == PoliceState.CHASE:
                 self.lost_time += dt
                 if self.last_seen is not None:
                     self._plan(self.last_seen)
@@ -2497,12 +2496,7 @@ def test_arrest_and_escape_transitions():
 def test_distance_alone_can_arrest_moving_player():
     grid = GridMap(10, 10)
     police = PoliceCarAI(grid, Vec2(2.5, 2.5), [(2, 2), (8, 8)])
-    for _ in range(7):
-        police.update(
-            0.1,
-            Vec2(2.8, 2.5),
-            Vec2(4.0, 0.0),
-        )
+    police.update(0.1, Vec2(2.8, 2.5), Vec2(4.0, 0.0))
     assert police.state == PoliceState.ARREST
 
 
@@ -2866,7 +2860,7 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-The player starts with **three lives**. The only busted rule is one police car remaining within `0.7` game units for `0.65` seconds; player speed and the number of nearby police cars do not affect capture. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+The player starts with **three lives**. The only busted rule is one police car entering within `0.7` game units; capture is immediate, and player speed and the number of nearby police cars do not affect it. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
 
 ### Police-car responsibilities
 
@@ -2930,10 +2924,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 4 / 4 | 18.496 s |
-| Trained trajectory candidates | 4 / 4 | 11.950 s |
+| Analytical prediction only | 4 / 4 | 4.008 s |
+| Trained trajectory candidates | 4 / 4 | 4.008 s |
 
-Both modes now complete all deterministic scenarios under the distance-only busted rule. The trained candidate system cut mean capture time by 6.546 seconds and reduced the square-route scenario from 38.883 seconds to 12.650 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes now complete all deterministic scenarios. With immediate capture at `0.7` units, the arrest boundary dominates the short benchmark and both prediction modes produce the same result. The learned predictor remains useful for route selection before close contact, but this particular benchmark no longer demonstrates a capture-time advantage. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 
@@ -2999,27 +2993,27 @@ See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete arch
     "mode": "analytical_only",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 18.496,
+    "mean_capture_seconds": 4.008,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 6.217
+        "seconds": 2.317
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 26.467
+        "seconds": 9.6
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 38.883
+        "seconds": 2.333
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 2.417
+        "seconds": 1.783
       }
     ]
   },
@@ -3027,27 +3021,27 @@ See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete arch
     "mode": "trained_trajectory_ensemble",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 11.95,
+    "mean_capture_seconds": 4.008,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 6.217
+        "seconds": 2.317
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 26.517
+        "seconds": 9.6
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 12.65
+        "seconds": 2.333
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 2.417
+        "seconds": 1.783
       }
     ]
   }

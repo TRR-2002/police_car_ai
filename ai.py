@@ -308,14 +308,13 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            # Capture has one clear rule: maintain contact inside arrest range.
+            # Capture has one clear rule: crossing inside arrest range.
             if distance <= self.arrest_range:
-                self.capture_progress += dt
-            else:
-                self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
-            if self.capture_progress >= 0.65:
+                self.capture_progress = 0.0
                 self._transition(PoliceState.ARREST)
-            elif contact:
+            else:
+                self.capture_progress = 0.0
+            if self.state == PoliceState.CHASE and contact:
                 self.lost_time = 0.0
                 self.last_seen = observed_position
                 # Lead a moving target, with prediction bounded to avoid wild routes.
@@ -326,7 +325,7 @@ class PoliceCarAI:
                     else observed_position + observed_velocity * lead_time
                 ) + tactical_offset
                 self._plan(predicted)
-            else:
+            elif self.state == PoliceState.CHASE:
                 self.lost_time += dt
                 if self.last_seen is not None:
                     self._plan(self.last_seen)
