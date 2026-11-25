@@ -185,6 +185,32 @@ class PoliceDemo:
             )
         self.canvas.create_polygon(points, fill=color, outline="#f4f7fb", width=1)
 
+    def draw_life_markers(self, offset_x: float, offset_y: float):
+        """Draw three compact shield markers without adding HUD text."""
+        for index in range(3):
+            center_x = offset_x + 18 + index * 24
+            top = offset_y + 12
+            active = index < self.simulation.lives
+            fill = "#3aa7ff" if active else "#202a35"
+            outline = "#d8efff" if active else "#586675"
+            self.canvas.create_polygon(
+                center_x,
+                top,
+                center_x + 8,
+                top + 4,
+                center_x + 6,
+                top + 14,
+                center_x,
+                top + 19,
+                center_x - 6,
+                top + 14,
+                center_x - 8,
+                top + 4,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+
     def draw(self):
         self.canvas.delete("all")
         scale, offset_x, offset_y = self.viewport()
@@ -240,6 +266,8 @@ class PoliceDemo:
         for police in self.simulation.police_cars:
             color = "#ff334f" if police.state != PoliceState.PATROL else "#ff7b32"
             self.draw_car(police.position, police.velocity, color)
+
+        self.draw_life_markers(offset_x, offset_y)
 
         if self.simulation.arrested:
             self.canvas.create_rectangle(

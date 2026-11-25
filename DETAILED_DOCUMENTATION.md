@@ -1393,6 +1393,7 @@ class PoliceSimulation:
     """Authoritative game state with 60 Hz physics and 5 Hz AI decisions."""
 
     decision_interval = 0.20
+    player_max_speed = 5.2
 
     def __init__(
         self,
@@ -1442,6 +1443,17 @@ class PoliceSimulation:
             self.lives = 3
         self.reset_round()
 
+    def _register_capture(self) -> None:
+        self.lives = max(0, self.lives - 1)
+        if self.lives > 0:
+            # Losing one marker starts a clean round; it is not BUSTED yet.
+            self.reset_round()
+            return
+        self.busted = True
+        self.player_velocity = Vec2(0.0, 0.0)
+        for car in self.police_cars:
+            car.velocity = Vec2(0.0, 0.0)
+
     @property
     def arrested(self) -> bool:
         return self.busted or any(
@@ -1449,7 +1461,7 @@ class PoliceSimulation:
         )
 
     def _move_player(self, movement: Vec2, dt: float) -> None:
-        target_velocity = movement.normalized() * 4.5
+        target_velocity = movement.normalized() * self.player_max_speed
         blend = min(1.0, 9.0 * dt)
         self.player_velocity = self.player_velocity + (
             target_velocity - self.player_velocity
@@ -1525,11 +1537,7 @@ class PoliceSimulation:
         if self.busted:
             return
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
-            self.busted = True
-            self.lives = max(0, self.lives - 1)
-            self.player_velocity = Vec2(0.0, 0.0)
-            for car in self.police_cars:
-                car.velocity = Vec2(0.0, 0.0)
+            self._register_capture()
             return
         dt = min(max(dt, 1e-4), 0.1)
         self.elapsed += dt
@@ -1559,11 +1567,7 @@ class PoliceSimulation:
                 search_target=self._search_target(index, police),
             )
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
-            self.busted = True
-            self.lives = max(0, self.lives - 1)
-            self.player_velocity = Vec2(0.0, 0.0)
-            for car in self.police_cars:
-                car.velocity = Vec2(0.0, 0.0)
+            self._register_capture()
 ````
 
 ### `main.py`
@@ -1756,6 +1760,32 @@ class PoliceDemo:
             )
         self.canvas.create_polygon(points, fill=color, outline="#f4f7fb", width=1)
 
+    def draw_life_markers(self, offset_x: float, offset_y: float):
+        """Draw three compact shield markers without adding HUD text."""
+        for index in range(3):
+            center_x = offset_x + 18 + index * 24
+            top = offset_y + 12
+            active = index < self.simulation.lives
+            fill = "#3aa7ff" if active else "#202a35"
+            outline = "#d8efff" if active else "#586675"
+            self.canvas.create_polygon(
+                center_x,
+                top,
+                center_x + 8,
+                top + 4,
+                center_x + 6,
+                top + 14,
+                center_x,
+                top + 19,
+                center_x - 6,
+                top + 14,
+                center_x - 8,
+                top + 4,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+
     def draw(self):
         self.canvas.delete("all")
         scale, offset_x, offset_y = self.viewport()
@@ -1811,6 +1841,8 @@ class PoliceDemo:
         for police in self.simulation.police_cars:
             color = "#ff334f" if police.state != PoliceState.PATROL else "#ff7b32"
             self.draw_car(police.position, police.velocity, color)
+
+        self.draw_life_markers(offset_x, offset_y)
 
         if self.simulation.arrested:
             self.canvas.create_rectangle(
@@ -1921,11 +1953,12 @@ def run_suite(use_neural: bool, duration: float) -> dict:
             simulation.step(1 / 60, player_input(scenario, step / 60))
             if simulation.arrested:
                 break
+        elapsed = (step + 1) / 60
         outcomes.append(
             {
                 "scenario": scenario,
                 "arrested": simulation.arrested,
-                "seconds": round(simulation.elapsed, 3),
+                "seconds": round(elapsed, 3),
             }
         )
     captured = [item["seconds"] for item in outcomes if item["arrested"]]
@@ -2691,21 +2724,14 @@ def test_headless_simulation_is_deterministic():
     ]
 
 
-def test_busted_state_freezes_until_reset():
+def test_first_two_captures_remove_markers_without_busted():
     simulation, _ = make_simulation()
-    simulation.police_cars[0].state = PoliceState.ARREST
-    simulation.step(1 / 60)
-    assert simulation.busted
-    assert simulation.lives == 2
-    frozen_position = simulation.player_position
-    frozen_time = simulation.elapsed
-    simulation.step(1.0, Vec2(1, 0))
-    assert simulation.player_position == frozen_position
-    assert simulation.elapsed == frozen_time
-    simulation.retry()
-    assert not simulation.busted
-    assert simulation.lives == 2
-    assert simulation.player_position == Vec2(5.5, 5.5)
+    for expected_lives in (2, 1):
+        simulation.police_cars[0].state = PoliceState.ARREST
+        simulation.step(1 / 60)
+        assert not simulation.busted
+        assert simulation.lives == expected_lives
+        assert simulation.player_position == Vec2(5.5, 5.5)
 
 
 def test_three_lives_then_new_game():
@@ -2714,13 +2740,24 @@ def test_three_lives_then_new_game():
         simulation.police_cars[0].state = PoliceState.ARREST
         simulation.step(1 / 60)
         assert simulation.lives == expected_lives
-        assert simulation.busted
-        if expected_lives:
-            simulation.retry()
+        assert simulation.busted == (expected_lives == 0)
     assert simulation.game_over
+    frozen_position = simulation.player_position
+    frozen_time = simulation.elapsed
+    simulation.step(1.0, Vec2(1, 0))
+    assert simulation.player_position == frozen_position
+    assert simulation.elapsed == frozen_time
     simulation.retry()
     assert simulation.lives == 3
     assert not simulation.busted
+
+
+def test_player_has_small_speed_advantage_over_police():
+    simulation, _ = make_simulation()
+    assert simulation.player_max_speed > max(
+        car.max_speed for car in simulation.police_cars
+    )
+    assert simulation.player_max_speed - simulation.police_cars[0].max_speed < 0.5
 
 
 def test_radio_extrapolates_and_search_units_spread_out():
@@ -2860,7 +2897,9 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-The player starts with **three lives**. The only busted rule is one police car entering within `0.7` game units; capture is immediate, and player speed and the number of nearby police cars do not affect it. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+The player starts with **three shield markers** in the upper-left corner. The capture condition is one police car entering within `0.7` game units. The first two contacts remove one shield and immediately begin a clean round; they do **not** display BUSTED. Only the third contact removes the last shield, freezes physics and AI, and opens **Retry/New Game** and **Quit** below the playfield. Player speed and the number of nearby police cars do not alter this rule.
+
+The player reaches `5.2` game units per second while police reach `4.9`, giving the player a small straight-line speed advantage. Police must therefore win through interception, flanking, map geometry, and coordinated searching rather than raw speed.
 
 ### Police-car responsibilities
 
@@ -2924,10 +2963,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 4 / 4 | 4.008 s |
-| Trained trajectory candidates | 4 / 4 | 4.008 s |
+| Analytical prediction only | 4 / 4 | 16.400 s |
+| Trained trajectory candidates | 4 / 4 | 13.459 s |
 
-Both modes now complete all deterministic scenarios. With immediate capture at `0.7` units, the arrest boundary dominates the short benchmark and both prediction modes produce the same result. The learned predictor remains useful for route selection before close contact, but this particular benchmark no longer demonstrates a capture-time advantage. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes complete all deterministic three-contact scenarios despite the player's speed advantage. The trained candidate system reduces mean game-over time by 2.941 seconds and cuts the circular scenario from 30.300 seconds to 15.917 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 
@@ -2993,27 +3032,27 @@ See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete arch
     "mode": "analytical_only",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 4.008,
+    "mean_capture_seconds": 16.4,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 2.317
+        "seconds": 6.35
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 9.6
+        "seconds": 22.0
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 2.333
+        "seconds": 6.95
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 1.783
+        "seconds": 30.3
       }
     ]
   },
@@ -3021,27 +3060,27 @@ See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete arch
     "mode": "trained_trajectory_ensemble",
     "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 4.008,
+    "mean_capture_seconds": 13.459,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 2.317
+        "seconds": 6.35
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 9.6
+        "seconds": 24.617
       },
       {
         "scenario": "square",
         "arrested": true,
-        "seconds": 2.333
+        "seconds": 6.95
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 1.783
+        "seconds": 15.917
       }
     ]
   }

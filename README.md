@@ -106,7 +106,9 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-The player starts with **three lives**. The only busted rule is one police car entering within `0.7` game units; capture is immediate, and player speed and the number of nearby police cars do not affect it. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+The player starts with **three shield markers** in the upper-left corner. The capture condition is one police car entering within `0.7` game units. The first two contacts remove one shield and immediately begin a clean round; they do **not** display BUSTED. Only the third contact removes the last shield, freezes physics and AI, and opens **Retry/New Game** and **Quit** below the playfield. Player speed and the number of nearby police cars do not alter this rule.
+
+The player reaches `5.2` game units per second while police reach `4.9`, giving the player a small straight-line speed advantage. Police must therefore win through interception, flanking, map geometry, and coordinated searching rather than raw speed.
 
 ### Police-car responsibilities
 
@@ -170,10 +172,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 4 / 4 | 4.008 s |
-| Trained trajectory candidates | 4 / 4 | 4.008 s |
+| Analytical prediction only | 4 / 4 | 16.400 s |
+| Trained trajectory candidates | 4 / 4 | 13.459 s |
 
-Both modes now complete all deterministic scenarios. With immediate capture at `0.7` units, the arrest boundary dominates the short benchmark and both prediction modes produce the same result. The learned predictor remains useful for route selection before close contact, but this particular benchmark no longer demonstrates a capture-time advantage. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes complete all deterministic three-contact scenarios despite the player's speed advantage. The trained candidate system reduces mean game-over time by 2.941 seconds and cuts the circular scenario from 30.300 seconds to 15.917 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 

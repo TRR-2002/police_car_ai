@@ -60,21 +60,14 @@ def test_headless_simulation_is_deterministic():
     ]
 
 
-def test_busted_state_freezes_until_reset():
+def test_first_two_captures_remove_markers_without_busted():
     simulation, _ = make_simulation()
-    simulation.police_cars[0].state = PoliceState.ARREST
-    simulation.step(1 / 60)
-    assert simulation.busted
-    assert simulation.lives == 2
-    frozen_position = simulation.player_position
-    frozen_time = simulation.elapsed
-    simulation.step(1.0, Vec2(1, 0))
-    assert simulation.player_position == frozen_position
-    assert simulation.elapsed == frozen_time
-    simulation.retry()
-    assert not simulation.busted
-    assert simulation.lives == 2
-    assert simulation.player_position == Vec2(5.5, 5.5)
+    for expected_lives in (2, 1):
+        simulation.police_cars[0].state = PoliceState.ARREST
+        simulation.step(1 / 60)
+        assert not simulation.busted
+        assert simulation.lives == expected_lives
+        assert simulation.player_position == Vec2(5.5, 5.5)
 
 
 def test_three_lives_then_new_game():
@@ -83,13 +76,24 @@ def test_three_lives_then_new_game():
         simulation.police_cars[0].state = PoliceState.ARREST
         simulation.step(1 / 60)
         assert simulation.lives == expected_lives
-        assert simulation.busted
-        if expected_lives:
-            simulation.retry()
+        assert simulation.busted == (expected_lives == 0)
     assert simulation.game_over
+    frozen_position = simulation.player_position
+    frozen_time = simulation.elapsed
+    simulation.step(1.0, Vec2(1, 0))
+    assert simulation.player_position == frozen_position
+    assert simulation.elapsed == frozen_time
     simulation.retry()
     assert simulation.lives == 3
     assert not simulation.busted
+
+
+def test_player_has_small_speed_advantage_over_police():
+    simulation, _ = make_simulation()
+    assert simulation.player_max_speed > max(
+        car.max_speed for car in simulation.police_cars
+    )
+    assert simulation.player_max_speed - simulation.police_cars[0].max_speed < 0.5
 
 
 def test_radio_extrapolates_and_search_units_spread_out():

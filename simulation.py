@@ -34,6 +34,7 @@ class PoliceSimulation:
     """Authoritative game state with 60 Hz physics and 5 Hz AI decisions."""
 
     decision_interval = 0.20
+    player_max_speed = 5.2
 
     def __init__(
         self,
@@ -83,6 +84,17 @@ class PoliceSimulation:
             self.lives = 3
         self.reset_round()
 
+    def _register_capture(self) -> None:
+        self.lives = max(0, self.lives - 1)
+        if self.lives > 0:
+            # Losing one marker starts a clean round; it is not BUSTED yet.
+            self.reset_round()
+            return
+        self.busted = True
+        self.player_velocity = Vec2(0.0, 0.0)
+        for car in self.police_cars:
+            car.velocity = Vec2(0.0, 0.0)
+
     @property
     def arrested(self) -> bool:
         return self.busted or any(
@@ -90,7 +102,7 @@ class PoliceSimulation:
         )
 
     def _move_player(self, movement: Vec2, dt: float) -> None:
-        target_velocity = movement.normalized() * 4.5
+        target_velocity = movement.normalized() * self.player_max_speed
         blend = min(1.0, 9.0 * dt)
         self.player_velocity = self.player_velocity + (
             target_velocity - self.player_velocity
@@ -166,11 +178,7 @@ class PoliceSimulation:
         if self.busted:
             return
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
-            self.busted = True
-            self.lives = max(0, self.lives - 1)
-            self.player_velocity = Vec2(0.0, 0.0)
-            for car in self.police_cars:
-                car.velocity = Vec2(0.0, 0.0)
+            self._register_capture()
             return
         dt = min(max(dt, 1e-4), 0.1)
         self.elapsed += dt
@@ -200,9 +208,5 @@ class PoliceSimulation:
                 search_target=self._search_target(index, police),
             )
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
-            self.busted = True
-            self.lives = max(0, self.lives - 1)
-            self.player_velocity = Vec2(0.0, 0.0)
-            for car in self.police_cars:
-                car.velocity = Vec2(0.0, 0.0)
+            self._register_capture()
 

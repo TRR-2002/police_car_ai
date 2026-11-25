@@ -46,11 +46,12 @@ def run_suite(use_neural: bool, duration: float) -> dict:
             simulation.step(1 / 60, player_input(scenario, step / 60))
             if simulation.arrested:
                 break
+        elapsed = (step + 1) / 60
         outcomes.append(
             {
                 "scenario": scenario,
                 "arrested": simulation.arrested,
-                "seconds": round(simulation.elapsed, 3),
+                "seconds": round(elapsed, 3),
             }
         )
     captured = [item["seconds"] for item in outcomes if item["arrested"]]
