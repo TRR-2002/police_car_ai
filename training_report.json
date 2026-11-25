@@ -1,0 +1,13 @@
+{
+  "role_rows": 50000,
+  "trajectory_rows": 50000,
+  "role_epochs": 60,
+  "trajectory_epoch_limit": 90,
+  "ctde_iterations": 2500,
+  "role_validation_accuracy": 1.0,
+  "role_test_accuracy": 1.0,
+  "trajectory_validation_mse": 3.438608246142394e-06,
+  "trajectory_test_mse": 3.637446752691176e-06,
+  "ctde_final_role_accuracy": 1.0,
+  "split": "80% train / 10% validation / 10% held-out test"
+}
