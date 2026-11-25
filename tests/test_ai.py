@@ -62,6 +62,19 @@ def test_arrest_and_escape_transitions():
     assert police.state == PoliceState.CHASE
 
 
+def test_two_unit_containment_can_arrest_moving_player():
+    grid = GridMap(10, 10)
+    police = PoliceCarAI(grid, Vec2(2.5, 2.5), [(2, 2), (8, 8)])
+    for _ in range(7):
+        police.update(
+            0.1,
+            Vec2(2.8, 2.5),
+            Vec2(4.0, 0.0),
+            containment_support=2,
+        )
+    assert police.state == PoliceState.ARREST
+
+
 def test_world_edges_and_building_corners_are_solid_and_slide():
     grid = GridMap(5, 5, {(2, 2)})
     assert not grid.is_drivable_position(Vec2(-0.1, 1.0))

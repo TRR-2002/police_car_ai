@@ -124,19 +124,38 @@ class PathPredictionEnsemble:
             with torch.no_grad():
                 deltas = self.neural_model(state)[0].view(-1, 2)
             neural_predictions = [
-                self.motion.position
-                + Vec2(float(delta[0]) * self.grid.width, float(delta[1]) * self.grid.height)
-                for delta in deltas
+                self.motion.position + _clamp_vector(
+                    Vec2(float(delta[0]) * self.grid.width, float(delta[1]) * self.grid.height),
+                    (self.motion.velocity.length() + 7.0 * PREDICTION_HORIZONS[index])
+                    * PREDICTION_HORIZONS[index],
+                )
+                for index, delta in enumerate(deltas)
             ]
         for prediction_index, horizon in enumerate(PREDICTION_HORIZONS):
             dynamics = self.motion.forecast(horizon)
             linear = self.motion.position + self.reported_velocity * horizon
             blended = dynamics * self.motion.confidence + linear * (1 - self.motion.confidence)
-            if neural_predictions is not None:
-                # The learned model receives 35% weight; analytical estimates keep
-                # the ensemble stable outside its sample distribution.
-                blended = blended * 0.65 + neural_predictions[prediction_index] * 0.35
             output.append((horizon, self._road_project(blended), self.motion.confidence))
+            if neural_predictions is not None:
+                # Straight-line acceleration is already handled exactly by the
+                # analytical filter. During turns, offer the learned forecast as
+                # a separate candidate; route utility chooses it only when its
+                # travel timing is better than the analytical candidate.
+                speed = self.motion.velocity.length()
+                acceleration = self.motion.acceleration.length()
+                cross = abs(
+                    self.motion.velocity.x * self.motion.acceleration.y
+                    - self.motion.velocity.y * self.motion.acceleration.x
+                )
+                turning = cross / max(speed * acceleration, 1e-6) > 0.15
+                if turning:
+                    output.append(
+                        (
+                            horizon,
+                            self._road_project(neural_predictions[prediction_index]),
+                            self.motion.confidence * 0.8,
+                        )
+                    )
         return output
 
     def best_intercept(self, car: PoliceCarAI) -> Vec2 | None:

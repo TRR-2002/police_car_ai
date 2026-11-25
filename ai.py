@@ -196,7 +196,7 @@ class PoliceCarAI:
     grid: GridMap
     position: Vec2
     patrol_points: list[Cell]
-    max_speed: float = 3.8
+    max_speed: float = 4.9
     acceleration: float = 10.0
     arrest_range: float = 0.7
     state: PoliceState = PoliceState.PATROL
@@ -281,19 +281,24 @@ class PoliceCarAI:
         tactical_offset: Vec2 = Vec2(0.0, 0.0),
         predicted_target: Vec2 | None = None,
         avoid_positions: tuple[Vec2, ...] = (),
-        radio_alert: bool = False,
+        radio_position: Vec2 | None = None,
+        radio_velocity: Vec2 = Vec2(0.0, 0.0),
+        containment_support: int = 0,
     ) -> PoliceState:
         dt = min(max(dt, 1e-4), 0.1)
         visible, heard = self.perception.detect(
             self.grid, self.position, player_position, player_velocity
         )
-        contact = visible or heard or radio_alert
+        local_contact = visible or heard
+        contact = local_contact or radio_position is not None
+        observed_position = player_position if local_contact else radio_position
+        observed_velocity = player_velocity if local_contact else radio_velocity
         distance = self.position.distance_to(player_position)
         self.replan_time -= dt
 
         if self.state == PoliceState.PATROL:
             if contact:
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 self._transition(PoliceState.CHASE)
             else:
                 destination = self.grid.cell_center(self.patrol_points[self.patrol_index])
@@ -303,7 +308,10 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            if distance <= self.arrest_range and player_velocity.length() < 1.5:
+            contained = containment_support >= 2
+            if distance <= self.arrest_range and (
+                player_velocity.length() < 1.5 or contained
+            ):
                 self.capture_progress += dt
             else:
                 self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
@@ -311,13 +319,13 @@ class PoliceCarAI:
                 self._transition(PoliceState.ARREST)
             elif contact:
                 self.lost_time = 0.0
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 # Lead a moving target, with prediction bounded to avoid wild routes.
                 lead_time = min(1.2, distance / max(self.max_speed, 0.1))
                 predicted = (
                     predicted_target
                     if predicted_target is not None
-                    else player_position + player_velocity * lead_time
+                    else observed_position + observed_velocity * lead_time
                 ) + tactical_offset
                 self._plan(predicted)
             else:
@@ -329,7 +337,7 @@ class PoliceCarAI:
 
         elif self.state == PoliceState.SEARCH:
             if contact:
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 self._transition(PoliceState.CHASE)
             else:
                 self.search_time += dt
