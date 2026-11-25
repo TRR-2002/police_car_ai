@@ -127,7 +127,7 @@ class PoliceDemo:
         self.root.destroy()
 
     def retry(self):
-        self.simulation.reset()
+        self.simulation.retry()
         self.busted_panel.pack_forget()
         if self.debug_visible:
             self.status.pack(fill="x", side="bottom")
@@ -277,6 +277,15 @@ class PoliceDemo:
         if self.simulation.busted and not self.busted_panel.winfo_ismapped():
             if self.debug_visible:
                 self.status.pack_forget()
+            if self.simulation.game_over:
+                self.busted_label.configure(text="GAME OVER - NO LIVES LEFT")
+                self.retry_button.configure(text="New Game")
+            else:
+                suffix = "life" if self.simulation.lives == 1 else "lives"
+                self.busted_label.configure(
+                    text=f"BUSTED - {self.simulation.lives} {suffix} left"
+                )
+                self.retry_button.configure(text="Retry")
             self.busted_panel.pack(fill="x", side="bottom")
             self.retry_button.focus_set()
         self.draw()

@@ -283,7 +283,7 @@ class PoliceCarAI:
         avoid_positions: tuple[Vec2, ...] = (),
         radio_position: Vec2 | None = None,
         radio_velocity: Vec2 = Vec2(0.0, 0.0),
-        containment_support: int = 0,
+        search_target: Vec2 | None = None,
     ) -> PoliceState:
         dt = min(max(dt, 1e-4), 0.1)
         visible, heard = self.perception.detect(
@@ -308,10 +308,8 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            contained = containment_support >= 2
-            if distance <= self.arrest_range and (
-                player_velocity.length() < 1.5 or contained
-            ):
+            # Capture has one clear rule: maintain contact inside arrest range.
+            if distance <= self.arrest_range:
                 self.capture_progress += dt
             else:
                 self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
@@ -341,8 +339,9 @@ class PoliceCarAI:
                 self._transition(PoliceState.CHASE)
             else:
                 self.search_time += dt
-                if self.last_seen is not None:
-                    self._plan(self.last_seen)
+                destination = search_target if search_target is not None else self.last_seen
+                if destination is not None:
+                    self._plan(destination)
                 if self.search_time >= 5.0:
                     self._transition(PoliceState.PATROL)
 

@@ -62,7 +62,7 @@ def test_arrest_and_escape_transitions():
     assert police.state == PoliceState.CHASE
 
 
-def test_two_unit_containment_can_arrest_moving_player():
+def test_distance_alone_can_arrest_moving_player():
     grid = GridMap(10, 10)
     police = PoliceCarAI(grid, Vec2(2.5, 2.5), [(2, 2), (8, 8)])
     for _ in range(7):
@@ -70,7 +70,6 @@ def test_two_unit_containment_can_arrest_moving_player():
             0.1,
             Vec2(2.8, 2.5),
             Vec2(4.0, 0.0),
-            containment_support=2,
         )
     assert police.state == PoliceState.ARREST
 

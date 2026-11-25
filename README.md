@@ -106,7 +106,18 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-When the player is captured, physics and AI freeze and a compact panel appears below the playfield with two choices: **Retry** and **Quit**. Retry can also be triggered with `R` or `Enter`; `Escape` quits. Restarting clears the radio report, motion predictors, tactical decisions, arrest state, velocities, and elapsed session time.
+The player starts with **three lives**. The only busted rule is one police car remaining within `0.7` game units for `0.65` seconds; player speed and the number of nearby police cars do not affect capture. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+
+### Police-car responsibilities
+
+| Unit | Learned role | Primary responsibility | Search responsibility |
+| --- | --- | --- | --- |
+| Police 1 | Direct | Follow the best current/intercept position and maintain close pressure. | Search outward from the last sighting on the first sector. |
+| Police 2 | Lead | Move ahead of the player's velocity to block the likely escape route. | Search the second sector, approximately 90 degrees from Police 1. |
+| Police 3 | Left flank | Approach the predicted path from its left side and deny left turns. | Search the opposite sector, approximately 180 degrees from Police 1. |
+| Police 4 | Right flank | Mirror Police 3 from the right and deny right turns. | Search the fourth sector, approximately 270 degrees from Police 1. |
+
+On detection, police publish a three-second report containing observed position and velocity. If visual contact is lost, the report extrapolates motion for at most two seconds. After it expires, each unit searches a different rotating, expanding sector around the last known position instead of stacking at one point.
 
 ## Reproduce the data and training
 
@@ -159,10 +170,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 2 / 4 | 19.692 s |
-| Trained trajectory candidates | 3 / 4 | 19.494 s |
+| Analytical prediction only | 4 / 4 | 18.496 s |
+| Trained trajectory candidates | 4 / 4 | 11.950 s |
 
-The trained system additionally captured the zigzag scenario and reduced circular-pursuit capture time from 33.633 seconds to 23.450 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes now complete all deterministic scenarios under the distance-only busted rule. The trained candidate system cut mean capture time by 6.546 seconds and reduced the square-route scenario from 38.883 seconds to 12.650 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 

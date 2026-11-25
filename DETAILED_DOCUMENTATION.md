@@ -895,7 +895,7 @@ class PoliceCarAI:
         avoid_positions: tuple[Vec2, ...] = (),
         radio_position: Vec2 | None = None,
         radio_velocity: Vec2 = Vec2(0.0, 0.0),
-        containment_support: int = 0,
+        search_target: Vec2 | None = None,
     ) -> PoliceState:
         dt = min(max(dt, 1e-4), 0.1)
         visible, heard = self.perception.detect(
@@ -920,10 +920,8 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            contained = containment_support >= 2
-            if distance <= self.arrest_range and (
-                player_velocity.length() < 1.5 or contained
-            ):
+            # Capture has one clear rule: maintain contact inside arrest range.
+            if distance <= self.arrest_range:
                 self.capture_progress += dt
             else:
                 self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
@@ -953,8 +951,9 @@ class PoliceCarAI:
                 self._transition(PoliceState.CHASE)
             else:
                 self.search_time += dt
-                if self.last_seen is not None:
-                    self._plan(self.last_seen)
+                destination = search_target if search_target is not None else self.last_seen
+                if destination is not None:
+                    self._plan(destination)
                 if self.search_time >= 5.0:
                     self._transition(PoliceState.PATROL)
 
@@ -1369,6 +1368,7 @@ testable without opening a window.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from ai import GridMap, PoliceCarAI, PoliceState, Vec2
 from marl import DecentralizedController, action_offset
@@ -1380,6 +1380,14 @@ class RadioReport:
     position: Vec2
     velocity: Vec2
     remaining: float = 3.0
+    age: float = 0.0
+
+    def advance(self, dt: float) -> None:
+        self.remaining -= dt
+        self.age += dt
+
+    def extrapolated_position(self) -> Vec2:
+        return self.position + self.velocity * min(self.age, 2.0)
 
 
 class PoliceSimulation:
@@ -1400,9 +1408,14 @@ class PoliceSimulation:
         self.trajectory_model = trajectory_model
         self.spawn_points = spawn_points
         self.patrol_routes = patrol_routes
+        self.lives = 3
         self.reset()
 
     def reset(self) -> None:
+        self.lives = 3
+        self.reset_round()
+
+    def reset_round(self) -> None:
         self.player_position = Vec2(5.5, 5.5)
         self.player_velocity = Vec2(0.0, 0.0)
         self.police_cars = [
@@ -1420,6 +1433,15 @@ class PoliceSimulation:
         self.decision_remaining = 0.0
         self.elapsed = 0.0
         self.busted = False
+
+    @property
+    def game_over(self) -> bool:
+        return self.busted and self.lives <= 0
+
+    def retry(self) -> None:
+        if self.game_over:
+            self.lives = 3
+        self.reset_round()
 
     @property
     def arrested(self) -> bool:
@@ -1451,7 +1473,7 @@ class PoliceSimulation:
         if any(visible or heard for visible, heard in detections):
             self.radio = RadioReport(self.player_position, self.player_velocity)
         elif self.radio is not None:
-            self.radio.remaining -= dt
+            self.radio.advance(dt)
             if self.radio.remaining <= 0:
                 self.radio = None
         return detections
@@ -1462,8 +1484,21 @@ class PoliceSimulation:
         if detection[0] or detection[1]:
             return self.player_position, self.player_velocity, True
         if self.radio is not None:
-            return self.radio.position, self.radio.velocity, True
+            predicted = self.radio.extrapolated_position()
+            cell = self.grid.nearest_passable(self.grid.world_to_cell(predicted))
+            return self.grid.cell_center(cell), self.radio.velocity, True
         return self.player_position, self.player_velocity, False
+
+    def _search_target(self, index: int, police: PoliceCarAI) -> Vec2 | None:
+        if police.last_seen is None:
+            return None
+        angle = index * 1.5707963267948966 + police.search_time * 0.35
+        radius = min(6.0, 1.5 + police.search_time * 0.8)
+        candidate = police.last_seen + Vec2(
+            math.cos(angle) * radius, math.sin(angle) * radius
+        )
+        cell = self.grid.nearest_passable(self.grid.world_to_cell(candidate))
+        return self.grid.cell_center(cell)
 
     def _update_decisions(
         self, detections: list[tuple[bool, bool]], dt: float
@@ -1492,6 +1527,7 @@ class PoliceSimulation:
             return
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
             self.busted = True
+            self.lives = max(0, self.lives - 1)
             self.player_velocity = Vec2(0.0, 0.0)
             for car in self.police_cars:
                 car.velocity = Vec2(0.0, 0.0)
@@ -1506,9 +1542,6 @@ class PoliceSimulation:
             self.decision_remaining += self.decision_interval
 
         positions = tuple(car.position for car in self.police_cars)
-        containment_support = sum(
-            position.distance_to(self.player_position) <= 1.5 for position in positions
-        )
         radio_position = self.radio.position if self.radio else None
         radio_velocity = self.radio.velocity if self.radio else Vec2(0.0, 0.0)
         for index, police in enumerate(self.police_cars):
@@ -1524,10 +1557,11 @@ class PoliceSimulation:
                 avoid_positions=teammates,
                 radio_position=radio_position,
                 radio_velocity=radio_velocity,
-                containment_support=containment_support,
+                search_target=self._search_target(index, police),
             )
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
             self.busted = True
+            self.lives = max(0, self.lives - 1)
             self.player_velocity = Vec2(0.0, 0.0)
             for car in self.police_cars:
                 car.velocity = Vec2(0.0, 0.0)
@@ -1665,7 +1699,7 @@ class PoliceDemo:
         self.root.destroy()
 
     def retry(self):
-        self.simulation.reset()
+        self.simulation.retry()
         self.busted_panel.pack_forget()
         if self.debug_visible:
             self.status.pack(fill="x", side="bottom")
@@ -1815,6 +1849,15 @@ class PoliceDemo:
         if self.simulation.busted and not self.busted_panel.winfo_ismapped():
             if self.debug_visible:
                 self.status.pack_forget()
+            if self.simulation.game_over:
+                self.busted_label.configure(text="GAME OVER - NO LIVES LEFT")
+                self.retry_button.configure(text="New Game")
+            else:
+                suffix = "life" if self.simulation.lives == 1 else "lives"
+                self.busted_label.configure(
+                    text=f"BUSTED - {self.simulation.lives} {suffix} left"
+                )
+                self.retry_button.configure(text="Retry")
             self.busted_panel.pack(fill="x", side="bottom")
             self.retry_button.focus_set()
         self.draw()
@@ -2451,7 +2494,7 @@ def test_arrest_and_escape_transitions():
     assert police.state == PoliceState.CHASE
 
 
-def test_two_unit_containment_can_arrest_moving_player():
+def test_distance_alone_can_arrest_moving_player():
     grid = GridMap(10, 10)
     police = PoliceCarAI(grid, Vec2(2.5, 2.5), [(2, 2), (8, 8)])
     for _ in range(7):
@@ -2459,7 +2502,6 @@ def test_two_unit_containment_can_arrest_moving_player():
             0.1,
             Vec2(2.8, 2.5),
             Vec2(4.0, 0.0),
-            containment_support=2,
         )
     assert police.state == PoliceState.ARREST
 
@@ -2594,7 +2636,7 @@ def test_trainable_models_have_expected_outputs():
 
 ````python
 from ai import GridMap, PoliceCarAI, PoliceState, Vec2
-from simulation import PoliceSimulation
+from simulation import PoliceSimulation, RadioReport
 
 
 class CountingController:
@@ -2660,14 +2702,49 @@ def test_busted_state_freezes_until_reset():
     simulation.police_cars[0].state = PoliceState.ARREST
     simulation.step(1 / 60)
     assert simulation.busted
+    assert simulation.lives == 2
     frozen_position = simulation.player_position
     frozen_time = simulation.elapsed
     simulation.step(1.0, Vec2(1, 0))
     assert simulation.player_position == frozen_position
     assert simulation.elapsed == frozen_time
-    simulation.reset()
+    simulation.retry()
     assert not simulation.busted
+    assert simulation.lives == 2
     assert simulation.player_position == Vec2(5.5, 5.5)
+
+
+def test_three_lives_then_new_game():
+    simulation, _ = make_simulation()
+    for expected_lives in (2, 1, 0):
+        simulation.police_cars[0].state = PoliceState.ARREST
+        simulation.step(1 / 60)
+        assert simulation.lives == expected_lives
+        assert simulation.busted
+        if expected_lives:
+            simulation.retry()
+    assert simulation.game_over
+    simulation.retry()
+    assert simulation.lives == 3
+    assert not simulation.busted
+
+
+def test_radio_extrapolates_and_search_units_spread_out():
+    simulation, _ = make_simulation()
+    simulation.radio = RadioReport(Vec2(5.5, 5.5), Vec2(2, 0))
+    simulation.radio.advance(1.0)
+    position, velocity, available = simulation._observed_motion((False, False))
+    assert available and velocity == Vec2(2, 0)
+    assert position.x > 5.5
+
+    for car in simulation.police_cars:
+        car.last_seen = Vec2(10.5, 10.5)
+        car.search_time = 2.0
+    targets = {
+        simulation._search_target(index, car)
+        for index, car in enumerate(simulation.police_cars)
+    }
+    assert len(targets) == 4
 ````
 
 ### `pytest.ini`
@@ -2789,7 +2866,18 @@ Controls:
 
 Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
-When the player is captured, physics and AI freeze and a compact panel appears below the playfield with two choices: **Retry** and **Quit**. Retry can also be triggered with `R` or `Enter`; `Escape` quits. Restarting clears the radio report, motion predictors, tactical decisions, arrest state, velocities, and elapsed session time.
+The player starts with **three lives**. The only busted rule is one police car remaining within `0.7` game units for `0.65` seconds; player speed and the number of nearby police cars do not affect capture. Each bust consumes one life, freezes physics and AI, and opens **Retry** and **Quit** below the playfield. After the third bust, Retry becomes **New Game** and restores all three lives.
+
+### Police-car responsibilities
+
+| Unit | Learned role | Primary responsibility | Search responsibility |
+| --- | --- | --- | --- |
+| Police 1 | Direct | Follow the best current/intercept position and maintain close pressure. | Search outward from the last sighting on the first sector. |
+| Police 2 | Lead | Move ahead of the player's velocity to block the likely escape route. | Search the second sector, approximately 90 degrees from Police 1. |
+| Police 3 | Left flank | Approach the predicted path from its left side and deny left turns. | Search the opposite sector, approximately 180 degrees from Police 1. |
+| Police 4 | Right flank | Mirror Police 3 from the right and deny right turns. | Search the fourth sector, approximately 270 degrees from Police 1. |
+
+On detection, police publish a three-second report containing observed position and velocity. If visual contact is lost, the report extrapolates motion for at most two seconds. After it expires, each unit searches a different rotating, expanding sector around the last known position instead of stacking at one point.
 
 ## Reproduce the data and training
 
@@ -2842,10 +2930,10 @@ The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural 
 
 | Mode | Captures | Mean capture time |
 | --- | ---: | ---: |
-| Analytical prediction only | 2 / 4 | 19.692 s |
-| Trained trajectory candidates | 3 / 4 | 19.494 s |
+| Analytical prediction only | 4 / 4 | 18.496 s |
+| Trained trajectory candidates | 4 / 4 | 11.950 s |
 
-The trained system additionally captured the zigzag scenario and reduced circular-pursuit capture time from 33.633 seconds to 23.450 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+Both modes now complete all deterministic scenarios under the distance-only busted rule. The trained candidate system cut mean capture time by 6.546 seconds and reduced the square-route scenario from 38.883 seconds to 12.650 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 
@@ -2909,57 +2997,57 @@ See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete arch
   "duration_limit_seconds": 45.0,
   "analytical": {
     "mode": "analytical_only",
-    "captures": 2,
+    "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 19.692,
+    "mean_capture_seconds": 18.496,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 5.75
+        "seconds": 6.217
       },
       {
         "scenario": "zigzag",
-        "arrested": false,
-        "seconds": 45.0
+        "arrested": true,
+        "seconds": 26.467
       },
       {
         "scenario": "square",
-        "arrested": false,
-        "seconds": 45.0
+        "arrested": true,
+        "seconds": 38.883
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 33.633
+        "seconds": 2.417
       }
     ]
   },
   "trained": {
     "mode": "trained_trajectory_ensemble",
-    "captures": 3,
+    "captures": 4,
     "scenarios": 4,
-    "mean_capture_seconds": 19.494,
+    "mean_capture_seconds": 11.95,
     "outcomes": [
       {
         "scenario": "east",
         "arrested": true,
-        "seconds": 5.75
+        "seconds": 6.217
       },
       {
         "scenario": "zigzag",
         "arrested": true,
-        "seconds": 29.283
+        "seconds": 26.517
       },
       {
         "scenario": "square",
-        "arrested": false,
-        "seconds": 45.0
+        "arrested": true,
+        "seconds": 12.65
       },
       {
         "scenario": "circle",
         "arrested": true,
-        "seconds": 23.45
+        "seconds": 2.417
       }
     ]
   }

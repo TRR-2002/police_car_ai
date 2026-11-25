@@ -8,6 +8,7 @@ testable without opening a window.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from ai import GridMap, PoliceCarAI, PoliceState, Vec2
 from marl import DecentralizedController, action_offset
@@ -19,6 +20,14 @@ class RadioReport:
     position: Vec2
     velocity: Vec2
     remaining: float = 3.0
+    age: float = 0.0
+
+    def advance(self, dt: float) -> None:
+        self.remaining -= dt
+        self.age += dt
+
+    def extrapolated_position(self) -> Vec2:
+        return self.position + self.velocity * min(self.age, 2.0)
 
 
 class PoliceSimulation:
@@ -39,9 +48,14 @@ class PoliceSimulation:
         self.trajectory_model = trajectory_model
         self.spawn_points = spawn_points
         self.patrol_routes = patrol_routes
+        self.lives = 3
         self.reset()
 
     def reset(self) -> None:
+        self.lives = 3
+        self.reset_round()
+
+    def reset_round(self) -> None:
         self.player_position = Vec2(5.5, 5.5)
         self.player_velocity = Vec2(0.0, 0.0)
         self.police_cars = [
@@ -59,6 +73,15 @@ class PoliceSimulation:
         self.decision_remaining = 0.0
         self.elapsed = 0.0
         self.busted = False
+
+    @property
+    def game_over(self) -> bool:
+        return self.busted and self.lives <= 0
+
+    def retry(self) -> None:
+        if self.game_over:
+            self.lives = 3
+        self.reset_round()
 
     @property
     def arrested(self) -> bool:
@@ -90,7 +113,7 @@ class PoliceSimulation:
         if any(visible or heard for visible, heard in detections):
             self.radio = RadioReport(self.player_position, self.player_velocity)
         elif self.radio is not None:
-            self.radio.remaining -= dt
+            self.radio.advance(dt)
             if self.radio.remaining <= 0:
                 self.radio = None
         return detections
@@ -101,8 +124,21 @@ class PoliceSimulation:
         if detection[0] or detection[1]:
             return self.player_position, self.player_velocity, True
         if self.radio is not None:
-            return self.radio.position, self.radio.velocity, True
+            predicted = self.radio.extrapolated_position()
+            cell = self.grid.nearest_passable(self.grid.world_to_cell(predicted))
+            return self.grid.cell_center(cell), self.radio.velocity, True
         return self.player_position, self.player_velocity, False
+
+    def _search_target(self, index: int, police: PoliceCarAI) -> Vec2 | None:
+        if police.last_seen is None:
+            return None
+        angle = index * 1.5707963267948966 + police.search_time * 0.35
+        radius = min(6.0, 1.5 + police.search_time * 0.8)
+        candidate = police.last_seen + Vec2(
+            math.cos(angle) * radius, math.sin(angle) * radius
+        )
+        cell = self.grid.nearest_passable(self.grid.world_to_cell(candidate))
+        return self.grid.cell_center(cell)
 
     def _update_decisions(
         self, detections: list[tuple[bool, bool]], dt: float
@@ -131,6 +167,7 @@ class PoliceSimulation:
             return
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
             self.busted = True
+            self.lives = max(0, self.lives - 1)
             self.player_velocity = Vec2(0.0, 0.0)
             for car in self.police_cars:
                 car.velocity = Vec2(0.0, 0.0)
@@ -145,9 +182,6 @@ class PoliceSimulation:
             self.decision_remaining += self.decision_interval
 
         positions = tuple(car.position for car in self.police_cars)
-        containment_support = sum(
-            position.distance_to(self.player_position) <= 1.5 for position in positions
-        )
         radio_position = self.radio.position if self.radio else None
         radio_velocity = self.radio.velocity if self.radio else Vec2(0.0, 0.0)
         for index, police in enumerate(self.police_cars):
@@ -163,10 +197,11 @@ class PoliceSimulation:
                 avoid_positions=teammates,
                 radio_position=radio_position,
                 radio_velocity=radio_velocity,
-                containment_support=containment_support,
+                search_target=self._search_target(index, police),
             )
         if any(car.state == PoliceState.ARREST for car in self.police_cars):
             self.busted = True
+            self.lives = max(0, self.lives - 1)
             self.player_velocity = Vec2(0.0, 0.0)
             for car in self.police_cars:
                 car.velocity = Vec2(0.0, 0.0)

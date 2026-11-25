@@ -1,5 +1,5 @@
 from ai import GridMap, PoliceCarAI, PoliceState, Vec2
-from simulation import PoliceSimulation
+from simulation import PoliceSimulation, RadioReport
 
 
 class CountingController:
@@ -65,12 +65,47 @@ def test_busted_state_freezes_until_reset():
     simulation.police_cars[0].state = PoliceState.ARREST
     simulation.step(1 / 60)
     assert simulation.busted
+    assert simulation.lives == 2
     frozen_position = simulation.player_position
     frozen_time = simulation.elapsed
     simulation.step(1.0, Vec2(1, 0))
     assert simulation.player_position == frozen_position
     assert simulation.elapsed == frozen_time
-    simulation.reset()
+    simulation.retry()
     assert not simulation.busted
+    assert simulation.lives == 2
     assert simulation.player_position == Vec2(5.5, 5.5)
+
+
+def test_three_lives_then_new_game():
+    simulation, _ = make_simulation()
+    for expected_lives in (2, 1, 0):
+        simulation.police_cars[0].state = PoliceState.ARREST
+        simulation.step(1 / 60)
+        assert simulation.lives == expected_lives
+        assert simulation.busted
+        if expected_lives:
+            simulation.retry()
+    assert simulation.game_over
+    simulation.retry()
+    assert simulation.lives == 3
+    assert not simulation.busted
+
+
+def test_radio_extrapolates_and_search_units_spread_out():
+    simulation, _ = make_simulation()
+    simulation.radio = RadioReport(Vec2(5.5, 5.5), Vec2(2, 0))
+    simulation.radio.advance(1.0)
+    position, velocity, available = simulation._observed_motion((False, False))
+    assert available and velocity == Vec2(2, 0)
+    assert position.x > 5.5
+
+    for car in simulation.police_cars:
+        car.last_seen = Vec2(10.5, 10.5)
+        car.search_time = 2.0
+    targets = {
+        simulation._search_target(index, car)
+        for index, car in enumerate(simulation.police_cars)
+    }
+    assert len(targets) == 4
 
