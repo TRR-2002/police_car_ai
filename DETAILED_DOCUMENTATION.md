@@ -808,7 +808,7 @@ class PoliceCarAI:
     grid: GridMap
     position: Vec2
     patrol_points: list[Cell]
-    max_speed: float = 3.8
+    max_speed: float = 4.9
     acceleration: float = 10.0
     arrest_range: float = 0.7
     state: PoliceState = PoliceState.PATROL
@@ -893,19 +893,24 @@ class PoliceCarAI:
         tactical_offset: Vec2 = Vec2(0.0, 0.0),
         predicted_target: Vec2 | None = None,
         avoid_positions: tuple[Vec2, ...] = (),
-        radio_alert: bool = False,
+        radio_position: Vec2 | None = None,
+        radio_velocity: Vec2 = Vec2(0.0, 0.0),
+        containment_support: int = 0,
     ) -> PoliceState:
         dt = min(max(dt, 1e-4), 0.1)
         visible, heard = self.perception.detect(
             self.grid, self.position, player_position, player_velocity
         )
-        contact = visible or heard or radio_alert
+        local_contact = visible or heard
+        contact = local_contact or radio_position is not None
+        observed_position = player_position if local_contact else radio_position
+        observed_velocity = player_velocity if local_contact else radio_velocity
         distance = self.position.distance_to(player_position)
         self.replan_time -= dt
 
         if self.state == PoliceState.PATROL:
             if contact:
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 self._transition(PoliceState.CHASE)
             else:
                 destination = self.grid.cell_center(self.patrol_points[self.patrol_index])
@@ -915,7 +920,10 @@ class PoliceCarAI:
                 self._plan(destination)
 
         if self.state == PoliceState.CHASE:
-            if distance <= self.arrest_range and player_velocity.length() < 1.5:
+            contained = containment_support >= 2
+            if distance <= self.arrest_range and (
+                player_velocity.length() < 1.5 or contained
+            ):
                 self.capture_progress += dt
             else:
                 self.capture_progress = max(0.0, self.capture_progress - 2.0 * dt)
@@ -923,13 +931,13 @@ class PoliceCarAI:
                 self._transition(PoliceState.ARREST)
             elif contact:
                 self.lost_time = 0.0
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 # Lead a moving target, with prediction bounded to avoid wild routes.
                 lead_time = min(1.2, distance / max(self.max_speed, 0.1))
                 predicted = (
                     predicted_target
                     if predicted_target is not None
-                    else player_position + player_velocity * lead_time
+                    else observed_position + observed_velocity * lead_time
                 ) + tactical_offset
                 self._plan(predicted)
             else:
@@ -941,7 +949,7 @@ class PoliceCarAI:
 
         elif self.state == PoliceState.SEARCH:
             if contact:
-                self.last_seen = player_position
+                self.last_seen = observed_position
                 self._transition(PoliceState.CHASE)
             else:
                 self.search_time += dt
@@ -1296,19 +1304,38 @@ class PathPredictionEnsemble:
             with torch.no_grad():
                 deltas = self.neural_model(state)[0].view(-1, 2)
             neural_predictions = [
-                self.motion.position
-                + Vec2(float(delta[0]) * self.grid.width, float(delta[1]) * self.grid.height)
-                for delta in deltas
+                self.motion.position + _clamp_vector(
+                    Vec2(float(delta[0]) * self.grid.width, float(delta[1]) * self.grid.height),
+                    (self.motion.velocity.length() + 7.0 * PREDICTION_HORIZONS[index])
+                    * PREDICTION_HORIZONS[index],
+                )
+                for index, delta in enumerate(deltas)
             ]
         for prediction_index, horizon in enumerate(PREDICTION_HORIZONS):
             dynamics = self.motion.forecast(horizon)
             linear = self.motion.position + self.reported_velocity * horizon
             blended = dynamics * self.motion.confidence + linear * (1 - self.motion.confidence)
-            if neural_predictions is not None:
-                # The learned model receives 35% weight; analytical estimates keep
-                # the ensemble stable outside its sample distribution.
-                blended = blended * 0.65 + neural_predictions[prediction_index] * 0.35
             output.append((horizon, self._road_project(blended), self.motion.confidence))
+            if neural_predictions is not None:
+                # Straight-line acceleration is already handled exactly by the
+                # analytical filter. During turns, offer the learned forecast as
+                # a separate candidate; route utility chooses it only when its
+                # travel timing is better than the analytical candidate.
+                speed = self.motion.velocity.length()
+                acceleration = self.motion.acceleration.length()
+                cross = abs(
+                    self.motion.velocity.x * self.motion.acceleration.y
+                    - self.motion.velocity.y * self.motion.acceleration.x
+                )
+                turning = cross / max(speed * acceleration, 1e-6) > 0.15
+                if turning:
+                    output.append(
+                        (
+                            horizon,
+                            self._road_project(neural_predictions[prediction_index]),
+                            self.motion.confidence * 0.8,
+                        )
+                    )
         return output
 
     def best_intercept(self, car: PoliceCarAI) -> Vec2 | None:
@@ -1329,10 +1356,171 @@ class PathPredictionEnsemble:
         return best[1] if best else self.motion.position
 ````
 
+### `simulation.py`
+
+````python
+"""Headless fixed-step police pursuit simulation.
+
+This module owns game state and model scheduling.  The Tk UI in main.py is only
+an input/render adapter, which makes pursuit behavior deterministic and directly
+testable without opening a window.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ai import GridMap, PoliceCarAI, PoliceState, Vec2
+from marl import DecentralizedController, action_offset
+from prediction import PathPredictionEnsemble, NeuralTrajectoryModel
+
+
+@dataclass
+class RadioReport:
+    position: Vec2
+    velocity: Vec2
+    remaining: float = 3.0
+
+
+class PoliceSimulation:
+    """Authoritative game state with 60 Hz physics and 5 Hz AI decisions."""
+
+    decision_interval = 0.20
+
+    def __init__(
+        self,
+        grid: GridMap,
+        controller: DecentralizedController,
+        trajectory_model: NeuralTrajectoryModel | None,
+        spawn_points: list[Vec2],
+        patrol_routes: list[list[tuple[int, int]]],
+    ):
+        self.grid = grid
+        self.controller = controller
+        self.trajectory_model = trajectory_model
+        self.spawn_points = spawn_points
+        self.patrol_routes = patrol_routes
+        self.reset()
+
+    def reset(self) -> None:
+        self.player_position = Vec2(5.5, 5.5)
+        self.player_velocity = Vec2(0.0, 0.0)
+        self.police_cars = [
+            PoliceCarAI(self.grid, spawn, route)
+            for spawn, route in zip(self.spawn_points, self.patrol_routes)
+        ]
+        self.predictors = [
+            PathPredictionEnsemble(self.grid, neural_model=self.trajectory_model)
+            for _ in self.police_cars
+        ]
+        self.last_actions = [0] * len(self.police_cars)
+        self.tactical_offsets = [Vec2(0.0, 0.0)] * len(self.police_cars)
+        self.intercepts: list[Vec2 | None] = [None] * len(self.police_cars)
+        self.radio: RadioReport | None = None
+        self.decision_remaining = 0.0
+        self.elapsed = 0.0
+
+    @property
+    def arrested(self) -> bool:
+        return any(car.state == PoliceState.ARREST for car in self.police_cars)
+
+    def _move_player(self, movement: Vec2, dt: float) -> None:
+        target_velocity = movement.normalized() * 4.5
+        blend = min(1.0, 9.0 * dt)
+        self.player_velocity = self.player_velocity + (
+            target_velocity - self.player_velocity
+        ) * blend
+        self.player_position, blocked = self.grid.move_with_slide(
+            self.player_position, self.player_velocity * dt, radius=0.24
+        )
+        if blocked.x:
+            self.player_velocity = Vec2(0.0, self.player_velocity.y)
+        if blocked.y:
+            self.player_velocity = Vec2(self.player_velocity.x, 0.0)
+
+    def _update_perception(self, dt: float) -> list[tuple[bool, bool]]:
+        detections = [
+            car.perception.detect(
+                self.grid, car.position, self.player_position, self.player_velocity
+            )
+            for car in self.police_cars
+        ]
+        if any(visible or heard for visible, heard in detections):
+            self.radio = RadioReport(self.player_position, self.player_velocity)
+        elif self.radio is not None:
+            self.radio.remaining -= dt
+            if self.radio.remaining <= 0:
+                self.radio = None
+        return detections
+
+    def _observed_motion(
+        self, detection: tuple[bool, bool]
+    ) -> tuple[Vec2, Vec2, bool]:
+        if detection[0] or detection[1]:
+            return self.player_position, self.player_velocity, True
+        if self.radio is not None:
+            return self.radio.position, self.radio.velocity, True
+        return self.player_position, self.player_velocity, False
+
+    def _update_decisions(
+        self, detections: list[tuple[bool, bool]], dt: float
+    ) -> None:
+        for index, (police, predictor, detection) in enumerate(
+            zip(self.police_cars, self.predictors, detections)
+        ):
+            observed_position, observed_velocity, has_report = self._observed_motion(
+                detection
+            )
+            if has_report:
+                predictor.observe(observed_position, observed_velocity, dt)
+            if self.decision_remaining > 0 or not has_report:
+                continue
+            action = self.controller.choose_action(
+                police, observed_position, observed_velocity, index
+            )
+            self.last_actions[index] = action
+            self.tactical_offsets[index] = action_offset(
+                action, police, observed_velocity
+            )
+            self.intercepts[index] = predictor.best_intercept(police)
+
+    def step(self, dt: float, movement: Vec2 = Vec2(0.0, 0.0)) -> None:
+        dt = min(max(dt, 1e-4), 0.1)
+        self.elapsed += dt
+        self._move_player(movement, dt)
+        detections = self._update_perception(dt)
+        self.decision_remaining -= dt
+        self._update_decisions(detections, dt)
+        if self.decision_remaining <= 0:
+            self.decision_remaining += self.decision_interval
+
+        positions = tuple(car.position for car in self.police_cars)
+        containment_support = sum(
+            position.distance_to(self.player_position) <= 1.5 for position in positions
+        )
+        radio_position = self.radio.position if self.radio else None
+        radio_velocity = self.radio.velocity if self.radio else Vec2(0.0, 0.0)
+        for index, police in enumerate(self.police_cars):
+            teammates = tuple(
+                position for other, position in enumerate(positions) if other != index
+            )
+            police.update(
+                dt,
+                self.player_position,
+                self.player_velocity,
+                tactical_offset=self.tactical_offsets[index],
+                predicted_target=self.intercepts[index],
+                avoid_positions=teammates,
+                radio_position=radio_position,
+                radio_velocity=radio_velocity,
+                containment_support=containment_support,
+            )
+````
+
 ### `main.py`
 
 ````python
-"""Smooth, resizable Tkinter demonstration for the production police AI."""
+"""Text-free, resizable Tkinter front end for the headless simulation."""
 
 from __future__ import annotations
 
@@ -1341,9 +1529,10 @@ from pathlib import Path
 import time
 import tkinter as tk
 
-from ai import GridMap, PoliceCarAI, PoliceState, Vec2
-from marl import ACTION_NAMES, DecentralizedController, action_offset
-from prediction import PathPredictionEnsemble, load_neural_trajectory_model
+from ai import GridMap, PoliceState, Vec2
+from marl import ACTION_NAMES, DecentralizedController
+from prediction import load_neural_trajectory_model
+from simulation import PoliceSimulation
 
 
 WIDTH, HEIGHT = 30, 20
@@ -1364,62 +1553,63 @@ def make_city() -> GridMap:
 class PoliceDemo:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Police Pursuit — CTDE MARL")
+        self.root.title("Police Pursuit - CTDE MARL")
         self.root.minsize(720, 480)
         self.root.geometry("960x640")
         self.root.configure(bg="#0c1117")
         self.canvas = tk.Canvas(self.root, bg="#0c1117", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        # Diagnostics never cover gameplay and are hidden by default.
+        self.status = tk.Label(
+            self.root,
+            bg="#0b1118",
+            fg="#cbd5e1",
+            anchor="w",
+            padx=10,
+            pady=4,
+            font=("Segoe UI", 9),
+        )
+
         self.grid = make_city()
-        self.spawn_points = [
-            Vec2(5.5, 15.5), Vec2(25.5, 15.5),
-            Vec2(15.5, 5.5), Vec2(25.5, 5.5),
+        spawn_points = [
+            Vec2(5.5, 15.5),
+            Vec2(25.5, 15.5),
+            Vec2(15.5, 5.5),
+            Vec2(25.5, 5.5),
         ]
-        self.patrol_routes = [
+        patrol_routes = [
             [(5, 15), (5, 10), (10, 10), (10, 15)],
             [(25, 15), (20, 15), (20, 10), (25, 10)],
             [(15, 5), (10, 5), (10, 0), (15, 0)],
             [(25, 5), (20, 5), (20, 0), (25, 0)],
         ]
-
-        root = Path(__file__).resolve().parent
-        policy_path = root / "marl_policy.pt"
-        trajectory_path = root / "trajectory_model.pt"
+        project = Path(__file__).resolve().parent
+        policy_path = project / "marl_policy.pt"
+        trajectory_path = project / "trajectory_model.pt"
         if not policy_path.is_file() or not trajectory_path.is_file():
             raise FileNotFoundError(
                 "Trained models missing. Run make_datasets.py, then train_models.py."
             )
-        self.controller = DecentralizedController.load(policy_path, 4)
-        self.trajectory_model = load_neural_trajectory_model(trajectory_path)
+        controller = DecentralizedController.load(policy_path, 4)
+        trajectory_model = load_neural_trajectory_model(trajectory_path)
+        self.simulation = PoliceSimulation(
+            self.grid,
+            controller,
+            trajectory_model,
+            spawn_points,
+            patrol_routes,
+        )
 
         self.keys: set[str] = set()
-        self.hud_visible = True
-        self.hud_deadline = time.perf_counter() + 4.0
+        self.debug_visible = False
         self.last_clock = time.perf_counter()
         self.accumulator = 0.0
         self.running = True
         self.root.bind("<KeyPress>", self.key_down)
         self.root.bind("<KeyRelease>", self.key_up)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.reset_world()
         self.root.after_idle(self.tick)
         self.root.focus_force()
-
-    def reset_world(self):
-        self.player_position = Vec2(5.5, 5.5)
-        self.player_velocity = Vec2(0.0, 0.0)
-        self.police_cars = [
-            PoliceCarAI(self.grid, spawn, route)
-            for spawn, route in zip(self.spawn_points, self.patrol_routes)
-        ]
-        self.predictors = [
-            PathPredictionEnsemble(self.grid, neural_model=self.trajectory_model)
-            for _ in self.police_cars
-        ]
-        self.last_actions = [0] * len(self.police_cars)
-        self.dispatch_timer = 0.0
-        self.hud_visible = True
-        self.hud_deadline = time.perf_counter() + 4.0
 
     def close(self):
         self.running = False
@@ -1429,77 +1619,27 @@ class PoliceDemo:
         key = event.keysym.lower()
         self.keys.add(key)
         if key == "r":
-            self.reset_world()
+            self.simulation.reset()
         elif key == "h":
-            self.hud_visible = not self.hud_visible
-            self.hud_deadline = float("inf") if self.hud_visible else 0.0
+            self.debug_visible = not self.debug_visible
+            if self.debug_visible:
+                self.status.pack(fill="x", side="bottom")
+            else:
+                self.status.pack_forget()
+        elif key == "escape":
+            self.close()
 
     def key_up(self, event):
         self.keys.discard(event.keysym.lower())
 
-    def move_player(self, dt: float):
+    def movement_input(self) -> Vec2:
         x = int("d" in self.keys or "right" in self.keys) - int(
             "a" in self.keys or "left" in self.keys
         )
         y = int("s" in self.keys or "down" in self.keys) - int(
             "w" in self.keys or "up" in self.keys
         )
-        target_velocity = Vec2(x, y).normalized() * 4.5
-        blend = min(1.0, 9.0 * dt)
-        self.player_velocity = self.player_velocity + (
-            target_velocity - self.player_velocity
-        ) * blend
-        self.player_position, blocked = self.grid.move_with_slide(
-            self.player_position, self.player_velocity * dt, radius=0.24
-        )
-        if blocked.x:
-            self.player_velocity = Vec2(0.0, self.player_velocity.y)
-        if blocked.y:
-            self.player_velocity = Vec2(self.player_velocity.x, 0.0)
-
-    def update_physics(self, dt: float):
-        self.move_player(dt)
-        detections = [
-            car.perception.detect(
-                self.grid, car.position, self.player_position, self.player_velocity
-            )
-            for car in self.police_cars
-        ]
-        if any(visible or heard for visible, heard in detections):
-            self.dispatch_timer = 3.0
-        else:
-            self.dispatch_timer = max(0.0, self.dispatch_timer - dt)
-        radio_alert = self.dispatch_timer > 0.0
-
-        positions = tuple(car.position for car in self.police_cars)
-        decisions = []
-        for index, police in enumerate(self.police_cars):
-            action = self.controller.choose_action(
-                police, self.player_position, self.player_velocity, index
-            )
-            self.last_actions[index] = action
-            visible, heard = detections[index]
-            if visible or heard:
-                self.predictors[index].observe(
-                    self.player_position, self.player_velocity, dt
-                )
-            decisions.append(
-                (
-                    action_offset(action, police, self.player_velocity),
-                    self.predictors[index].best_intercept(police),
-                    tuple(position for other, position in enumerate(positions) if other != index),
-                )
-            )
-        for police, (offset, prediction, teammates) in zip(self.police_cars, decisions):
-            police.update(
-                dt,
-                self.player_position,
-                self.player_velocity,
-                tactical_offset=offset,
-                predicted_target=prediction,
-                avoid_positions=teammates,
-                radio_alert=radio_alert,
-            )
+        return Vec2(x, y)
 
     def viewport(self) -> tuple[float, float, float]:
         width = max(1, self.canvas.winfo_width())
@@ -1532,8 +1672,13 @@ class PoliceDemo:
         scale, offset_x, offset_y = self.viewport()
         map_right, map_bottom = offset_x + WIDTH * scale, offset_y + HEIGHT * scale
         self.canvas.create_rectangle(
-            offset_x, offset_y, map_right, map_bottom,
-            fill="#20262d", outline="#5a6673", width=2
+            offset_x,
+            offset_y,
+            map_right,
+            map_bottom,
+            fill="#20262d",
+            outline="#5a6673",
+            width=2,
         )
         for y in range(HEIGHT):
             for x in range(WIDTH):
@@ -1541,56 +1686,62 @@ class PoliceDemo:
                 if (x, y) in self.grid.blocked:
                     inset = max(1.0, scale * 0.07)
                     self.canvas.create_rectangle(
-                        x0 + inset, y0 + inset,
-                        x0 + scale - inset, y0 + scale - inset,
-                        fill="#505a65", outline="#687481"
+                        x0 + inset,
+                        y0 + inset,
+                        x0 + scale - inset,
+                        y0 + scale - inset,
+                        fill="#505a65",
+                        outline="#687481",
                     )
                 else:
                     self.canvas.create_rectangle(
                         x0, y0, x0 + scale, y0 + scale, outline="#29313a"
                     )
 
-        route_colors = ("#ffd166", "#06d6a0", "#c77dff", "#f78c6b")
-        for index, police in enumerate(self.police_cars):
-            if len(police.path) > 1:
-                points = [
-                    coordinate
-                    for cell in police.path
-                    for coordinate in self.screen(self.grid.cell_center(cell))
-                ]
-                self.canvas.create_line(
-                    *points, fill=route_colors[index], width=max(1, scale * 0.07), smooth=True
-                )
-        self.draw_car(self.player_position, self.player_velocity, "#3aa7ff")
-        for police in self.police_cars:
+        if self.debug_visible:
+            route_colors = ("#ffd166", "#06d6a0", "#c77dff", "#f78c6b")
+            for index, police in enumerate(self.simulation.police_cars):
+                if len(police.path) > 1:
+                    points = [
+                        coordinate
+                        for cell in police.path
+                        for coordinate in self.screen(self.grid.cell_center(cell))
+                    ]
+                    self.canvas.create_line(
+                        *points,
+                        fill=route_colors[index],
+                        width=max(1, scale * 0.07),
+                        smooth=True,
+                    )
+
+        self.draw_car(
+            self.simulation.player_position,
+            self.simulation.player_velocity,
+            "#3aa7ff",
+        )
+        for police in self.simulation.police_cars:
             color = "#ff334f" if police.state != PoliceState.PATROL else "#ff7b32"
             self.draw_car(police.position, police.velocity, color)
 
-        arrested = any(car.state == PoliceState.ARREST for car in self.police_cars)
-        if arrested:
+        if self.simulation.arrested:
             self.canvas.create_rectangle(
-                offset_x + 3, offset_y + 3, map_right - 3, map_bottom - 3,
-                outline="#ff334f", width=max(4, scale * 0.18)
+                offset_x + 3,
+                offset_y + 3,
+                map_right - 3,
+                map_bottom - 3,
+                outline="#ff334f",
+                width=max(4, scale * 0.18),
             )
 
-        if self.hud_visible and time.perf_counter() <= self.hud_deadline:
+        if self.debug_visible:
             states = "   ".join(
-                f"P{index + 1} {car.state.name} · {ACTION_NAMES[self.last_actions[index]]}"
-                for index, car in enumerate(self.police_cars)
+                f"P{index + 1} {car.state.name} / "
+                f"{ACTION_NAMES[self.simulation.last_actions[index]]}"
+                for index, car in enumerate(self.simulation.police_cars)
             )
-            self.canvas.create_rectangle(
-                offset_x + 12, offset_y + 12,
-                min(map_right - 12, offset_x + 700), offset_y + 68,
-                fill="#0b1118", outline="#495562", width=1
-            )
-            self.canvas.create_text(
-                offset_x + 24, offset_y + 24, anchor="nw",
-                fill="#f1f5f9", font=("Segoe UI", 10, "bold"), text=states
-            )
-            self.canvas.create_text(
-                offset_x + 24, offset_y + 47, anchor="nw",
-                fill="#9eabb8", font=("Segoe UI", 9),
-                text="WASD/arrows drive · R reset · H HUD · status auto-hides"
+            radio = "radio active" if self.simulation.radio else "radio quiet"
+            self.status.configure(
+                text=f"{states}   |   {radio}   |   H hides diagnostics"
             )
 
     def tick(self):
@@ -1602,13 +1753,11 @@ class PoliceDemo:
         self.accumulator += frame_time
         steps = 0
         while self.accumulator >= PHYSICS_DT and steps < 6:
-            self.update_physics(PHYSICS_DT)
+            self.simulation.step(PHYSICS_DT, self.movement_input())
             self.accumulator -= PHYSICS_DT
             steps += 1
-        if self.hud_visible and now > self.hud_deadline:
-            self.hud_visible = False
         self.draw()
-        self.root.after(8, self.tick)
+        self.root.after(16, self.tick)
 
     def run(self):
         self.root.mainloop()
@@ -1616,6 +1765,96 @@ class PoliceDemo:
 
 if __name__ == "__main__":
     PoliceDemo().run()
+````
+
+### `evaluate_gameplay.py`
+
+````python
+"""Deterministic gameplay evaluation for trained and analytical predictors."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from pathlib import Path
+
+from ai import Vec2
+from main import make_city
+from marl import DecentralizedController
+from prediction import load_neural_trajectory_model
+from simulation import PoliceSimulation
+
+
+ROOT = Path(__file__).resolve().parent
+SPAWNS = [Vec2(5.5, 15.5), Vec2(25.5, 15.5), Vec2(15.5, 5.5), Vec2(25.5, 5.5)]
+PATROLS = [
+    [(5, 15), (5, 10), (10, 10), (10, 15)],
+    [(25, 15), (20, 15), (20, 10), (25, 10)],
+    [(15, 5), (10, 5), (10, 0), (15, 0)],
+    [(25, 5), (20, 5), (20, 0), (25, 0)],
+]
+
+
+def player_input(name: str, seconds: float) -> Vec2:
+    if name == "east":
+        return Vec2(1, 0)
+    if name == "zigzag":
+        return Vec2(1, 1 if int(seconds / 1.4) % 2 == 0 else -1)
+    if name == "square":
+        return (Vec2(1, 0), Vec2(0, 1), Vec2(-1, 0), Vec2(0, -1))[int(seconds / 2.2) % 4]
+    angle = seconds * 1.3
+    return Vec2(math.cos(angle), math.sin(angle))
+
+
+def run_suite(use_neural: bool, duration: float) -> dict:
+    controller = DecentralizedController.load(ROOT / "marl_policy.pt", 4)
+    model = load_neural_trajectory_model(ROOT / "trajectory_model.pt") if use_neural else None
+    outcomes = []
+    for scenario in ("east", "zigzag", "square", "circle"):
+        simulation = PoliceSimulation(make_city(), controller, model, SPAWNS, PATROLS)
+        steps = int(duration * 60)
+        for step in range(steps):
+            simulation.step(1 / 60, player_input(scenario, step / 60))
+            if simulation.arrested:
+                break
+        outcomes.append(
+            {
+                "scenario": scenario,
+                "arrested": simulation.arrested,
+                "seconds": round(simulation.elapsed, 3),
+            }
+        )
+    captured = [item["seconds"] for item in outcomes if item["arrested"]]
+    return {
+        "mode": "trained_trajectory_ensemble" if use_neural else "analytical_only",
+        "captures": len(captured),
+        "scenarios": len(outcomes),
+        "mean_capture_seconds": round(sum(captured) / len(captured), 3) if captured else None,
+        "outcomes": outcomes,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--duration", type=float, default=20.0)
+    parser.add_argument("--output", type=Path, default=ROOT / "gameplay_report.json")
+    args = parser.parse_args()
+    if args.duration <= 0:
+        raise ValueError("--duration must be positive")
+    report = {
+        "physics_hz": 60,
+        "decision_hz": 5,
+        "duration_limit_seconds": args.duration,
+        "analytical": run_suite(False, args.duration),
+        "trained": run_suite(True, args.duration),
+    }
+    args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()
 ````
 
 ### `make_datasets.py`
@@ -1914,6 +2153,91 @@ if __name__ == "__main__":
     print(f"final batch role accuracy: {result['final_batch_role_accuracy']:.3f}")
 ````
 
+### `export_models_to_go.py`
+
+````python
+"""Export locally trained PyTorch police models as dependency-free Go weights.
+
+The generated file is compiled into Port Halden.  Runtime code therefore never
+loads pickle/checkpoint data and does not require Python, PyTorch, or a DLL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+import torch
+
+
+def checksum(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def go_values(tensor: torch.Tensor) -> str:
+    values = tensor.detach().cpu().reshape(-1).tolist()
+    lines = []
+    for start in range(0, len(values), 8):
+        chunk = values[start : start + 8]
+        lines.append("\t" + ", ".join(f"{value:.9g}" for value in chunk) + ",")
+    return "\n".join(lines)
+
+
+def emit_array(name: str, tensor: torch.Tensor) -> str:
+    return f"var {name} = [...]float32{{\n{go_values(tensor)}\n}}\n"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parent)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    actor_path = args.source / "marl_policy.pt"
+    trajectory_path = args.source / "trajectory_model.pt"
+    report_path = args.source / "training_report.json"
+    actor_payload = torch.load(actor_path, map_location="cpu", weights_only=False)
+    trajectory_payload = torch.load(trajectory_path, map_location="cpu", weights_only=False)
+    actor = actor_payload["actor_state"]
+    trajectory = trajectory_payload["model_state"]
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    pieces = [
+        "// Code generated by police_car_ai/export_models_to_go.py; DO NOT EDIT.\n",
+        "package main\n\n",
+        f'const policeActorCheckpointSHA256 = "{checksum(actor_path)}"\n',
+        f'const policeTrajectoryCheckpointSHA256 = "{checksum(trajectory_path)}"\n',
+        f"const policeTrainingRoleRows = {int(report['role_rows'])}\n",
+        f"const policeTrainingTrajectoryRows = {int(report['trajectory_rows'])}\n",
+        f"const policeTrainingCTDEIterations = {int(report['ctde_iterations'])}\n",
+        f"const policeTrainingRoleTestAccuracy = {float(report['role_test_accuracy']):.9g}\n",
+        f"const policeTrainingTrajectoryTestMSE = {float(report['trajectory_test_mse']):.9g}\n\n",
+        emit_array("policeActorW1", actor["network.0.weight"]),
+        emit_array("policeActorB1", actor["network.0.bias"]),
+        emit_array("policeActorW2", actor["network.2.weight"]),
+        emit_array("policeActorB2", actor["network.2.bias"]),
+        emit_array("policeActorW3", actor["network.4.weight"]),
+        emit_array("policeActorB3", actor["network.4.bias"]),
+        emit_array("policeTrajectoryW1", trajectory["network.0.weight"]),
+        emit_array("policeTrajectoryB1", trajectory["network.0.bias"]),
+        emit_array("policeTrajectoryW2", trajectory["network.2.weight"]),
+        emit_array("policeTrajectoryB2", trajectory["network.2.bias"]),
+        emit_array("policeTrajectoryW3", trajectory["network.4.weight"]),
+        emit_array("policeTrajectoryB3", trajectory["network.4.bias"]),
+    ]
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text("".join(pieces), encoding="utf-8", newline="\n")
+    print(f"exported trained actor and trajectory weights to {args.output}")
+    print(f"actor sha256: {checksum(actor_path)}")
+    print(f"trajectory sha256: {checksum(trajectory_path)}")
+
+
+if __name__ == "__main__":
+    main()
+````
+
 ### `build_documentation.py`
 
 ````python
@@ -1931,18 +2255,23 @@ SOURCE_FILES = [
     "ai.py",
     "marl.py",
     "prediction.py",
+    "simulation.py",
     "main.py",
+    "evaluate_gameplay.py",
     "make_datasets.py",
     "train_models.py",
     "train_marl.py",
+    "export_models_to_go.py",
     "build_documentation.py",
     "tests/test_ai.py",
     "tests/test_marl.py",
     "tests/test_prediction.py",
     "tests/test_training_data.py",
+    "tests/test_simulation.py",
     "pytest.ini",
     "README.md",
     "training_report.json",
+    "gameplay_report.json",
 ]
 
 
@@ -2059,6 +2388,19 @@ def test_arrest_and_escape_transitions():
     assert police.state == PoliceState.ARREST
     police.update(0.1, Vec2(5.0, 2.5), Vec2(0, 0))
     assert police.state == PoliceState.CHASE
+
+
+def test_two_unit_containment_can_arrest_moving_player():
+    grid = GridMap(10, 10)
+    police = PoliceCarAI(grid, Vec2(2.5, 2.5), [(2, 2), (8, 8)])
+    for _ in range(7):
+        police.update(
+            0.1,
+            Vec2(2.8, 2.5),
+            Vec2(4.0, 0.0),
+            containment_support=2,
+        )
+    assert police.state == PoliceState.ARREST
 
 
 def test_world_edges_and_building_corners_are_solid_and_slide():
@@ -2187,6 +2529,71 @@ def test_trainable_models_have_expected_outputs():
     assert NeuralTrajectoryModel()(torch.zeros(8, 6)).shape == (8, 10)
 ````
 
+### `tests/test_simulation.py`
+
+````python
+from ai import GridMap, PoliceCarAI, Vec2
+from simulation import PoliceSimulation
+
+
+class CountingController:
+    def __init__(self):
+        self.calls = 0
+
+    def choose_action(self, car, player_position, player_velocity, agent_index):
+        self.calls += 1
+        return agent_index
+
+
+def make_simulation():
+    grid = GridMap(20, 20)
+    controller = CountingController()
+    simulation = PoliceSimulation(
+        grid,
+        controller,
+        None,
+        [Vec2(2.5, 2.5), Vec2(17.5, 2.5), Vec2(2.5, 17.5), Vec2(17.5, 17.5)],
+        [[(2, 2), (2, 8)], [(17, 2), (17, 8)], [(2, 17), (8, 17)], [(17, 17), (8, 17)]],
+    )
+    return simulation, controller
+
+
+def test_neural_decisions_run_at_five_hz_not_physics_rate():
+    simulation, controller = make_simulation()
+    for car in simulation.police_cars:
+        car.perception.sight_range = 100
+    for _ in range(60):
+        simulation.step(1 / 60)
+    assert 16 <= controller.calls <= 24
+
+
+def test_radio_uses_reported_position_not_hidden_live_position():
+    grid = GridMap(20, 20)
+    police = PoliceCarAI(grid, Vec2(1.5, 1.5), [(1, 1), (1, 5)])
+    police.perception.sight_range = 1
+    report = Vec2(5.5, 5.5)
+    police.update(
+        0.1,
+        player_position=Vec2(18.5, 18.5),
+        player_velocity=Vec2(0, 0),
+        radio_position=report,
+        radio_velocity=Vec2(1, 0),
+    )
+    assert police.last_seen == report
+
+
+def test_headless_simulation_is_deterministic():
+    first, _ = make_simulation()
+    second, _ = make_simulation()
+    for _ in range(180):
+        first.step(1 / 60, Vec2(1, 0))
+        second.step(1 / 60, Vec2(1, 0))
+    assert first.player_position == second.player_position
+    assert [car.position for car in first.police_cars] == [
+        car.position for car in second.police_cars
+    ]
+````
+
 ### `pytest.ini`
 
 ````ini
@@ -2200,56 +2607,201 @@ pythonpath = .
 ````markdown
 # Police Car AI
 
-A small police game-AI demonstration with classical navigation plus cooperative multi-agent reinforcement learning. It does not use Mira's language model or require a GPU.
+A CPU-friendly cooperative police-pursuit simulation combining classical game AI, learned trajectory prediction, and multi-agent reinforcement learning with centralized training and decentralized execution (CTDE).
 
-For the complete architecture, filesystem, algorithms, dataset schemas, training pipeline, production checklist, engine-integration guidance, and verbatim source code, see [`DETAILED_DOCUMENTATION.md`](DETAILED_DOCUMENTATION.md).
+The project includes reproducible datasets, trained PyTorch checkpoints, held-out metrics, automated tests, a smooth Tkinter demonstration, and an exporter for embedding the trained networks in a dependency-free Go game.
 
-Implemented systems:
+## Highlights
 
-- finite state machine: `PATROL`, `CHASE`, `SEARCH`, `ARREST`;
-- sight, hearing, obstacle occlusion, and last-known-position memory;
-- optimal four-directional A* pathfinding around buildings;
-- predictive pursuit that leads a moving player;
-- acceleration-limited steering and waypoint following;
-- automatic return to patrol after an unsuccessful search.
-- four cooperating police cars;
-- centralized-training/decentralized-execution (CTDE) actor-critic;
-- centralized critic and global cooperative reward during training;
-- one shared actor using only each car's local observation during play;
-- learned direct pursuit, lead pursuit, left/right flanking roles;
-- expanded sight range of 12 cells and hearing range of 6 cells.
-- per-car alpha-beta-gamma motion filters estimating acceleration;
-- an ensemble of filtered-dynamics and reported-velocity forecasts;
-- road-projected future positions and A*-cost utility intercept selection;
-- police-to-police separation steering to prevent stacking;
-- sustained proximity required for arrest instead of instant capture;
-- wall sliding for the player instead of abrupt two-axis stopping.
+- Four independently executing police agents controlled by one shared actor.
+- Centralized critic and global cooperative reward used during training only.
+- Learned direct pursuit, lead intercept, left flank, and right flank tactics.
+- Supervised neural prediction at five future time horizons.
+- Alpha-beta-gamma motion filtering and analytical/neural prediction blending.
+- A* navigation, road projection, intercept utility, and separation steering.
+- Patrol, chase, search, and sustained-proximity arrest states.
+- Sight, hearing, obstacle occlusion, last-known-position memory, and radio dispatch.
+- Fixed-step simulation, responsive rendering, wall sliding, and corner handling.
+- Headless authoritative simulation separated from the Tk rendering adapter.
+- Text-free playfield by default; optional diagnostics live outside the game area.
+- CPU-only training and inference; no CUDA GPU is required.
 
-## Run
+## Architecture
 
-From PowerShell:
+```text
+                          CENTRALIZED TRAINING
+ team state ───────────────────> critic ─────────────> global value
+     │                              │
+     └─ local observation ─> shared actor ─> cooperative reward
 
-```powershell
-cd G:\Desktop\AI_dev\police_car_ai
-..\mini_gpt\.venv\Scripts\python.exe make_datasets.py --rows 50000
-..\mini_gpt\.venv\Scripts\python.exe train_models.py --role-epochs 60 --trajectory-epochs 90 --ctde-iterations 2500
-..\mini_gpt\.venv\Scripts\python.exe main.py
+                         DECENTRALIZED EXECUTION
+ local sensor/radio state ─> shared actor ─> role ─> tactical offset
+ player motion samples ─────> trajectory MLP ───────> future positions
+                                                │
+ filtered dynamics + A* route utility <─────────┘
+                         │
+              steering + collision safety
 ```
 
-`make_datasets.py` creates `data/team_roles.csv` and `data/trajectories.csv`, each with 50,000 reproducible samples by default. `train_models.py` uses independent 80/10/10 train, validation, and held-out test splits, supervised pretraining, early stopping for trajectory prediction, gradient clipping, and centralized actor-critic fine-tuning. It writes `marl_policy.pt`, `trajectory_model.pt`, and `training_report.json`. Training and play are CPU-only.
+### Tactical actor
 
-Drive the blue player car with **WASD** or the arrow keys. Press **R** to reset it. Four police cars patrol separate districts, share a three-second radio dispatch after any local detection, become red while responding, and display their learned roles and colored A* routes.
+```text
+11 inputs -> Linear(11,64) -> Tanh -> Linear(64,64) -> Tanh
+          -> Linear(64,5) -> action logits
+```
 
-The interface uses fixed 60 Hz physics, responsive aspect-ratio rendering, radius-aware world edges and building corners, and an auto-hiding HUD. Press **H** to toggle the HUD.
+### Trajectory predictor
+
+```text
+6 inputs -> Linear(6,64) -> ReLU -> Linear(64,64) -> ReLU
+         -> Linear(64,10) -> five X/Y future deltas
+```
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `ai.py` | Grid, vector math, A*, perception, FSM, steering, and police controller |
+| `marl.py` | Decentralized actor, centralized critic, CTDE training, and runtime controller |
+| `prediction.py` | Motion filter, neural predictor, road projection, and intercept utility |
+| `main.py` | Interactive Tkinter simulation |
+| `simulation.py` | Headless authoritative state, honest radio reports, fixed-step physics, and 5 Hz model scheduling |
+| `evaluate_gameplay.py` | Deterministic analytical-versus-trained gameplay benchmark |
+| `make_datasets.py` | Deterministic role and trajectory dataset generation |
+| `train_models.py` | Supervised training, validation selection, held-out evaluation, and CTDE fine-tuning |
+| `export_models_to_go.py` | Safe float32 checkpoint export for native Go inference |
+| `data/` | Included 50,000-row role and trajectory CSV datasets |
+| `tests/` | Unit and integration tests |
+| `marl_policy.pt` | Trained actor and training-only critic checkpoint |
+| `trajectory_model.pt` | Trained trajectory checkpoint |
+| `training_report.json` | Training configuration and held-out metrics |
+| `DETAILED_DOCUMENTATION.md` | Full design, algorithms, schemas, integration guidance, and source reference |
+
+## Requirements
+
+- Python 3.10 or newer
+- Tkinter, normally included with the Windows Python installer
+- Dependencies from `requirements.txt`
+
+Create an environment and install dependencies on Windows:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Linux/macOS activation uses `source .venv/bin/activate`. Linux users may need to install their distribution's Tk package separately.
+
+## Run the included trained simulation
+
+The repository already contains trained checkpoints:
+
+```powershell
+python main.py
+```
+
+Controls:
+
+| Key | Action |
+| --- | --- |
+| `WASD` or arrows | Drive the blue player car |
+| `R` | Reset the simulation and predictors |
+| `H` | Toggle routes and the external diagnostics strip |
+| `Escape` | Exit |
+
+Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
+
+## Reproduce the data and training
+
+```powershell
+python make_datasets.py --rows 50000 --seed 2026
+python train_models.py --role-epochs 60 --trajectory-epochs 90 --ctde-iterations 2500
+```
+
+The pipeline:
+
+1. Generates deterministic synthetic role and trajectory samples.
+2. Shuffles and splits them into 80% training, 10% validation, and 10% held-out test sets.
+3. Supervised-pretrains the shared role actor.
+4. Trains the trajectory MLP with AdamW, gradient clipping, early stopping, and best-validation restoration.
+5. Fine-tunes the actor and centralized critic using a cooperative global reward.
+6. Writes both checkpoints and `training_report.json`.
+
+## Current trained results
+
+| Metric | Result |
+| --- | ---: |
+| Role rows | 50,000 |
+| Trajectory rows | 50,000 |
+| Role validation accuracy | 1.0000 |
+| Held-out role accuracy | 1.0000 |
+| Trajectory validation MSE | 0.0000034386 |
+| Held-out trajectory MSE | 0.0000036374 |
+| CTDE iterations | 2,500 |
+| Final sampled role accuracy | 1.0000 |
+
+The perfect role score must be interpreted in context: the synthetic expert labels intentionally assign stable complementary roles by agent identity. It verifies that the model learned that curriculum; it is not evidence of general driving intelligence.
 
 ## Test
 
 ```powershell
-cd G:\Desktop\AI_dev\police_car_ai
-..\mini_gpt\.venv\Scripts\python.exe -m pytest -q
+python -m pytest -q
 ```
 
-The core in `ai.py` is engine-independent Python. Port the same state transitions and steering calculations into Unity, Godot, Unreal, or a custom engine while replacing `GridMap` with that engine's navigation system.
+Tests cover pathfinding, perception, state transitions, steering, radio coordination, checkpoint loading, decentralized actions, prediction, road projection, intercept selection, dataset schemas, and model dimensions.
+
+## Gameplay benchmark
+
+Run deterministic pursuit scenarios with and without the trained trajectory model:
+
+```powershell
+python evaluate_gameplay.py --duration 45
+```
+
+The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural decisions. The trained predictor competes with analytical forecasts through route/timing utility instead of being forcibly averaged into every target.
+
+| Mode | Captures | Mean capture time |
+| --- | ---: | ---: |
+| Analytical prediction only | 2 / 4 | 19.692 s |
+| Trained trajectory candidates | 3 / 4 | 19.494 s |
+
+The trained system additionally captured the zigzag scenario and reduced circular-pursuit capture time from 33.633 seconds to 23.450 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
+
+## Export to a native Go game
+
+The trained checkpoints can be converted into generated Go float32 arrays:
+
+```powershell
+python export_models_to_go.py --output path\to\game\police_models_generated.go
+```
+
+The exporter records checkpoint SHA-256 hashes, training metrics, and exact tensors. A native game can compile these arrays and implement the small dense networks directly, avoiding Python, PyTorch, unsafe checkpoint loading, or external model files at runtime. The Port Halden integration uses this deployment method.
+
+## Production integration guidance
+
+The engine-independent pieces in `ai.py`, `marl.py`, and `prediction.py` can be adapted to Unity, Godot, Unreal, or a custom engine. Replace `GridMap` and four-directional A* with the engine's road graph or navigation system, but keep collision and vehicle physics authoritative over model outputs.
+
+For a production game:
+
+1. Record trajectories and pursuit outcomes from the actual vehicle physics.
+2. Retrain on those observations instead of relying only on synthetic samples.
+3. Evaluate new policies against fixed seeded scenarios and the previous release.
+4. Keep perception honest; do not give agents hidden player coordinates.
+5. Version model schemas, feature normalization, weights, and checkpoint hashes together.
+6. Run decisions at a lower fixed frequency than physics and profile CPU cost.
+7. Log observations, chosen actions, routes, and state transitions for debugging.
+
+## Limitations
+
+- Training data is synthetic and does not model a complete commercial driving game.
+- The grid planner is four-directional and does not model road curvature or turning radius.
+- The current role curriculum makes agent identity highly predictive of the correct action.
+- Checkpoints are trusted local PyTorch files; do not load untrusted pickle-based checkpoints.
+- Runtime agents do not learn continuously. New weights require offline retraining and validation.
+
+See [DETAILED_DOCUMENTATION.md](DETAILED_DOCUMENTATION.md) for the complete architecture, dataset schemas, algorithm descriptions, file-system guide, production checklist, and engine-specific integration suggestions.
 ````
 
 ### `training_report.json`
@@ -2267,5 +2819,71 @@ The core in `ai.py` is engine-independent Python. Port the same state transition
   "trajectory_test_mse": 3.637446752691176e-06,
   "ctde_final_role_accuracy": 1.0,
   "split": "80% train / 10% validation / 10% held-out test"
+}
+````
+
+### `gameplay_report.json`
+
+````json
+{
+  "physics_hz": 60,
+  "decision_hz": 5,
+  "duration_limit_seconds": 45.0,
+  "analytical": {
+    "mode": "analytical_only",
+    "captures": 2,
+    "scenarios": 4,
+    "mean_capture_seconds": 19.692,
+    "outcomes": [
+      {
+        "scenario": "east",
+        "arrested": true,
+        "seconds": 5.75
+      },
+      {
+        "scenario": "zigzag",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "square",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "circle",
+        "arrested": true,
+        "seconds": 33.633
+      }
+    ]
+  },
+  "trained": {
+    "mode": "trained_trajectory_ensemble",
+    "captures": 3,
+    "scenarios": 4,
+    "mean_capture_seconds": 19.494,
+    "outcomes": [
+      {
+        "scenario": "east",
+        "arrested": true,
+        "seconds": 5.75
+      },
+      {
+        "scenario": "zigzag",
+        "arrested": true,
+        "seconds": 29.283
+      },
+      {
+        "scenario": "square",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "circle",
+        "arrested": true,
+        "seconds": 23.45
+      }
+    ]
+  }
 }
 ````

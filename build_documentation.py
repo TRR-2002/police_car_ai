@@ -12,18 +12,23 @@ SOURCE_FILES = [
     "ai.py",
     "marl.py",
     "prediction.py",
+    "simulation.py",
     "main.py",
+    "evaluate_gameplay.py",
     "make_datasets.py",
     "train_models.py",
     "train_marl.py",
+    "export_models_to_go.py",
     "build_documentation.py",
     "tests/test_ai.py",
     "tests/test_marl.py",
     "tests/test_prediction.py",
     "tests/test_training_data.py",
+    "tests/test_simulation.py",
     "pytest.ini",
     "README.md",
     "training_report.json",
+    "gameplay_report.json",
 ]
 
 

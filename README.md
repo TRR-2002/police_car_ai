@@ -15,6 +15,8 @@ The project includes reproducible datasets, trained PyTorch checkpoints, held-ou
 - Patrol, chase, search, and sustained-proximity arrest states.
 - Sight, hearing, obstacle occlusion, last-known-position memory, and radio dispatch.
 - Fixed-step simulation, responsive rendering, wall sliding, and corner handling.
+- Headless authoritative simulation separated from the Tk rendering adapter.
+- Text-free playfield by default; optional diagnostics live outside the game area.
 - CPU-only training and inference; no CUDA GPU is required.
 
 ## Architecture
@@ -56,6 +58,8 @@ The project includes reproducible datasets, trained PyTorch checkpoints, held-ou
 | `marl.py` | Decentralized actor, centralized critic, CTDE training, and runtime controller |
 | `prediction.py` | Motion filter, neural predictor, road projection, and intercept utility |
 | `main.py` | Interactive Tkinter simulation |
+| `simulation.py` | Headless authoritative state, honest radio reports, fixed-step physics, and 5 Hz model scheduling |
+| `evaluate_gameplay.py` | Deterministic analytical-versus-trained gameplay benchmark |
 | `make_datasets.py` | Deterministic role and trajectory dataset generation |
 | `train_models.py` | Supervised training, validation selection, held-out evaluation, and CTDE fine-tuning |
 | `export_models_to_go.py` | Safe float32 checkpoint export for native Go inference |
@@ -97,9 +101,10 @@ Controls:
 | --- | --- |
 | `WASD` or arrows | Drive the blue player car |
 | `R` | Reset the simulation and predictors |
-| `H` | Toggle the auto-hiding HUD |
+| `H` | Toggle routes and the external diagnostics strip |
+| `Escape` | Exit |
 
-Police cars patrol independently, broadcast legitimate detections, display their learned roles, and draw their planned routes.
+Police cars patrol independently and broadcast legitimate timestamped detections. The normal playfield contains no instructional or status text. Press `H` only when you want to inspect roles, routes, and radio state; diagnostics appear in a separate strip below the playfield.
 
 ## Reproduce the data and training
 
@@ -139,6 +144,23 @@ python -m pytest -q
 ```
 
 Tests cover pathfinding, perception, state transitions, steering, radio coordination, checkpoint loading, decentralized actions, prediction, road projection, intercept selection, dataset schemas, and model dimensions.
+
+## Gameplay benchmark
+
+Run deterministic pursuit scenarios with and without the trained trajectory model:
+
+```powershell
+python evaluate_gameplay.py --duration 45
+```
+
+The current report in `gameplay_report.json` uses 60 Hz physics and 5 Hz neural decisions. The trained predictor competes with analytical forecasts through route/timing utility instead of being forcibly averaged into every target.
+
+| Mode | Captures | Mean capture time |
+| --- | ---: | ---: |
+| Analytical prediction only | 2 / 4 | 19.692 s |
+| Trained trajectory candidates | 3 / 4 | 19.494 s |
+
+The trained system additionally captured the zigzag scenario and reduced circular-pursuit capture time from 33.633 seconds to 23.450 seconds. These are deterministic synthetic gameplay scenarios, not a substitute for testing against human players.
 
 ## Export to a native Go game
 
