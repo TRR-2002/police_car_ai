@@ -1,0 +1,61 @@
+{
+  "physics_hz": 60,
+  "decision_hz": 5,
+  "duration_limit_seconds": 45.0,
+  "analytical": {
+    "mode": "analytical_only",
+    "captures": 2,
+    "scenarios": 4,
+    "mean_capture_seconds": 19.692,
+    "outcomes": [
+      {
+        "scenario": "east",
+        "arrested": true,
+        "seconds": 5.75
+      },
+      {
+        "scenario": "zigzag",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "square",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "circle",
+        "arrested": true,
+        "seconds": 33.633
+      }
+    ]
+  },
+  "trained": {
+    "mode": "trained_trajectory_ensemble",
+    "captures": 3,
+    "scenarios": 4,
+    "mean_capture_seconds": 19.494,
+    "outcomes": [
+      {
+        "scenario": "east",
+        "arrested": true,
+        "seconds": 5.75
+      },
+      {
+        "scenario": "zigzag",
+        "arrested": true,
+        "seconds": 29.283
+      },
+      {
+        "scenario": "square",
+        "arrested": false,
+        "seconds": 45.0
+      },
+      {
+        "scenario": "circle",
+        "arrested": true,
+        "seconds": 23.45
+      }
+    ]
+  }
+}
